@@ -1,6 +1,6 @@
 # AQUA-KV
 
-This is the supplementary code for PV-Tuning: Beyond Straight-Through Estimation for Extreme LLM Compression.
+This is the supplementary code for Cache Me If You Must: Adaptive Key-Value Quantization for Large Language Models
 
 The current code version is designed for reproducing and prototyping. Efficient inference kernels are TBU.
 
