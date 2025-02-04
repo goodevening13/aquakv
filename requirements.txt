@@ -1,0 +1,13 @@
+torch==2.5.1
+transformers==4.46.3
+datasets==2.20.0
+optimum==1.23.3
+optimum-quanto==0.2.6
+quanto==0.2.0
+rouge==1.0.1
+jieba==0.42.1
+fuzzywuzzy==0.18.0
+einops==0.8.0
+wheel==0.45.1
+flash_attn
+tqdm

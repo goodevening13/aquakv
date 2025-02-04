@@ -1,0 +1,34 @@
+[tool.poetry]
+name = "longbench"
+version = "0.1.0"
+description = ""
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+datasets = "^3.0.1"
+tqdm = "^4.66.5"
+rouge = "^1.0.1"
+jieba = "^0.42.1"
+fuzzywuzzy = "^0.18.0"
+torch = "^2.4.0"
+transformers = "^4.45.0"
+einops = "^0.8.0"
+wheel = "^0.44.0"
+flash-attn = "^2.6.3"
+sentencepiece = "^0.2.0"
+vllm = "^0.6.3.post1"
+quanto = "^0.2.0"
+pandas = "^2.2.3"
+openpyxl = "^3.1.5"
+ipynbname = "^2024.1.0.0"
+seaborn = "^0.13.2"
+
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^6.29.5"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
