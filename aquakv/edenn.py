@@ -27,7 +27,7 @@ for file in grids_folder.iterdir():
             else:
                 raise ValueError("Could not parse grid file name")
         except ValueError:
-            warnings.warn(f"{file} failed to parse dimensions")
+            warnings.warn(f"failed to parse grid {file}")
             continue
         GRIDS[dim] = GRIDS.get(dim, {})
         if size in GRIDS[dim]:
