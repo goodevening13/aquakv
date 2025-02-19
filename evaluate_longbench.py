@@ -13,10 +13,12 @@ import numpy as np
 import random
 import argparse
 from functools import partial
-from llama_flash_attn_monkey_patch import replace_llama_attn_with_flash_attn
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from custom_cache import get_aqua_cache
+
+from LongBench.llama_flash_attn_monkey_patch import replace_llama_attn_with_flash_attn
+from LongBench.custom_cache import get_aqua_cache
+from LongBench.eval import collect_all_results
 
 QUANT_BITS = 1
 
@@ -199,8 +201,6 @@ def load_model_and_tokenizer(path, model_name, device):
     else:
         raise NotImplementedError(f"Could not load {model_name}")
 
-    print(model)
-
     model.generation_config.pad_token_id = tokenizer.pad_token_id
     model = model.eval()
     return model, tokenizer
@@ -245,8 +245,8 @@ if __name__ == '__main__':
     if args.quantize != (args.edenn_n is not None or args.edenn_d is not None):
         raise RuntimeError(f"--quantize is {args.quantize}, but {args.edenn_n=} and {args.edenn_d=}")
 
-    model2path = json.load(open("config/model2path.json", "r"))
-    model2maxlen = json.load(open("config/model2maxlen.json", "r"))
+    model2path = json.load(open("LongBench/config/model2path.json", "r"))
+    model2maxlen = json.load(open("LongBench/config/model2maxlen.json", "r"))
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     model_name = args.model
     # define your model
@@ -256,22 +256,17 @@ if __name__ == '__main__':
     else:
         assert args.datasets is not None
         datasets = [ds.strip() for ds in args.datasets.split(",")]
-        print(datasets)
         for dataset in datasets:
             if dataset not in DATASETS:
                 raise ValueError(f"dataset {dataset} not supported")
     # we design specific prompt format and max generation length for each task, feel free to modify them to optimize model output
-    dataset2prompt = json.load(open("config/dataset2prompt.json", "r"))
-    dataset2maxlen = json.load(open("config/dataset2maxlen.json", "r"))
+    dataset2prompt = json.load(open("LongBench/config/dataset2prompt.json", "r"))
+    dataset2maxlen = json.load(open("LongBench/config/dataset2maxlen.json", "r"))
     # predict on each dataset
     if args.quantize:
         suffix = '_quantize' + str(QUANT_BITS)
     else:
         suffix = ''
-    if not os.path.exists(args.out_path + suffix):
-        os.makedirs(args.out_path + suffix)
-    if not os.path.exists("pred_e" + suffix):
-        os.makedirs("pred_e" + suffix)
     for dataset in datasets:
         if args.e:
             data = load_dataset('THUDM/LongBench', f"{dataset}_e", split='test')
@@ -326,3 +321,6 @@ if __name__ == '__main__':
             assert p.exitcode == 0
 
     print("Total time took: ", time.time() - time_started)
+    result_inp_path = f"{args.out_path}/{model_name + suffix}/"
+    result_out_path = f"{args.out_path}/{model_name + suffix}/result.json"
+    collect_all_results(result_inp_path, result_out_path, args_e=args.e)

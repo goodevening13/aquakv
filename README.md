@@ -44,9 +44,9 @@ PREDICTORS_SAVE_PATH=./my_little_predictor.pt
 
 # LongBench
 LONGBENCH_MODEL_NAME=llama-3.2-3B
-LONGBENCH_DATASETS=narrativeqa,qasper
 LONGBENCH_OUT_PATH=./test_predictions
-
+LONGBENCH_DATASETS=samsum,2wikimqa,trec,hotpotqa,multi_news,triviaqa,qmsum,passage_count,multifieldqa_en,musique,qasper,passage_retrieval_en,narrativeqa,gov_report
+# ^-- note: here is the list of all benchmark tasks in English, some of them are memory-heavy, e.g. narrativeqa;
 
 python train_predictors.py --model_name $MODEL_PATH --model_seqlen $MODEL_SEQLEN --predictors_output_path $PREDICTORS_SAVE_PATH \
   --dataset $CALIBRATION_DATASET --total_nsamples $TOTAL_NSAMPLES --valid_nsamples $VALIDATION_NSAMPLES \
@@ -56,6 +56,10 @@ python train_predictors.py --model_name $MODEL_PATH --model_seqlen $MODEL_SEQLEN
 python evaluate_perplexity.py --model_name $MODEL_PATH --model_seqlen $MODEL_SEQLEN --predictors_input_path $PREDICTORS_SAVE_PATH \
   --edenn_d $EDENN_D --edenn_n $EDENN_N --hadamard_groupsize $HADAMARD_GROUPSIZE \
   --prefix_size $PREFIX_SIZE --recent_buffer_size $RECENT_BUFFER_SIZE
-
-# LongBench predictions currently require a cd to ./LongBench (see their README). We will post simple instructions soon.
+ 
+python evaluate_longbench.py --model $LONGBENCH_MODEL_NAME --predictors_input_path=$PREDICTORS_SAVE_PATH \
+ --edenn_d $EDENN_D --edenn_n $EDENN_N --hadamard_groupsize $HADAMARD_GROUPSIZE \
+ --prefix_size $PREFIX_SIZE --recent_buffer_size $RECENT_BUFFER_SIZE \
+ --datasets=$LONGBENCH_DATASETS --out_path=$LONGBENCH_OUT_PATH --quantize
+ 
 ```
