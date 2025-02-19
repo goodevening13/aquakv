@@ -3,6 +3,7 @@ HIGGS vector quantization utilities from https://gist.githubusercontent.com/galq
 """
 import functools
 import math
+import warnings
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -17,13 +18,23 @@ GRIDS = {
 }
 # Read files in the folder and read grids in the EDEN{DIM}_{SIZE}.pt format
 for file in grids_folder.iterdir():
+    print(f"DEBUGPRINT: reading {file}")
     if file.suffix == ".pt":
         try:
-            dim, size = map(int, file.stem[4:].split('-'))
+            if file.startswith("EDEN"):
+                dim, size = map(int, file.stem[4:].split('-'))
+            elif file.startswith("QUIPSHARP"):
+                dim, size = map(int, file.stem[9:].split('-'))
+            else:
+                raise ValueError("Could not parse grid file name")
         except ValueError:
+            print(f"DEBUGPRINT: {file} failed to parse")
             continue
         GRIDS[dim] = GRIDS.get(dim, {})
-        GRIDS[dim][size] = torch.load(file, map_location='cpu')
+        if size in GRIDS[dim]:
+            warnings.warn(f"Got multiple grids for {dim=} {size=}, overriding with {file}")
+        GRIDS[dim][size] = torch.load(file, map_location='cpu').to(torch.float32)
+        print(f"DEBUGPRINT: read {dim=} {size=} from {file}")
 
 GRID_NORMS = {k1: {k2: torch.linalg.norm(GRIDS[k1][k2], dim=1) ** 2 for k2 in v1.keys()} for k1, v1 in GRIDS.items()}
 
