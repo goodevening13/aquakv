@@ -21,9 +21,9 @@ for file in grids_folder.iterdir():
     print(f"DEBUGPRINT: reading {file}")
     if file.suffix == ".pt":
         try:
-            if file.startswith("EDEN"):
+            if file.name.startswith("EDEN"):
                 dim, size = map(int, file.stem[4:].split('-'))
-            elif file.startswith("QUIPSHARP"):
+            elif file.name.startswith("QUIPSHARP"):
                 dim, size = map(int, file.stem[9:].split('-'))
             else:
                 raise ValueError("Could not parse grid file name")
