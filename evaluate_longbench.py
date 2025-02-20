@@ -267,6 +267,10 @@ if __name__ == '__main__':
         suffix = '_quantize' + str(QUANT_BITS)
     else:
         suffix = ''
+    if not os.path.exists(args.out_path + suffix):
+        os.makedirs(args.out_path + suffix)
+    if not os.path.exists("pred_e" + suffix):
+        os.makedirs("pred_e" + suffix)
     for dataset in datasets:
         if args.e:
             data = load_dataset('THUDM/LongBench', f"{dataset}_e", split='test')
