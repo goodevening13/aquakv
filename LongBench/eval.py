@@ -43,6 +43,7 @@ def parse_args(args=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, default=None)
     parser.add_argument('--e', action='store_true', help="Evaluate on LongBench-E")
+    parser.add_argument('--input_path', type=str, default='pred_e', help='Path to the predicted LongBench tasks')
     return parser.parse_args(args)
 
 def scorer_e(dataset, predictions, answers, lengths, all_classes):
@@ -103,8 +104,8 @@ def collect_all_results(inp_path, out_path, args_e):
 if __name__ == '__main__':
     args = parse_args()
     if args.e:
-        inp_path = f"pred_e/{args.model}/"
-        out_path = f"pred_e/{args.model}/result.json"
+        inp_path = f"{args.input_path}/{args.model}/"
+        out_path = f"{args.input_path}/{args.model}/result.json"
     else:
         inp_path = f"pred/{args.model}/"
         out_path = f"pred/{args.model}/result.json"
