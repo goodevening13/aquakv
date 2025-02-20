@@ -69,8 +69,8 @@ python evaluate_longbench.py --model $LONGBENCH_MODEL_NAME --predictors_input_pa
 
 Code supports several grids for HIGGS quantization:
 
-- Fast GPU supproted grids: EDENN_D = 2, EDENN_N = 16, 64, 256 for quantization in 2, 3, 4 bits correspondingly
+1. Fast GPU supproted grids: EDENN_D = 2, EDENN_N = 16, 64, 256 for quantization in 2, 3, 4 bits correspondingly
 
-- Grids without fast GPU support, but with slightly better quality: 
- * EDENN_D = 4, EDENN_N = 256
- * EDENN_D = 8, EDENN_N = 65536
+2. Grids without fast GPU support, but with slightly better quality:
+    * EDENN_D = 4, EDENN_N = 256
+    * EDENN_D = 8, EDENN_N = 65536
