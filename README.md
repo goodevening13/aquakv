@@ -1,11 +1,10 @@
 # AQUA-KV
 
+[![arXiv](https://img.shields.io/badge/arXiv-2501.19392-b31b1b.svg)](https://arxiv.org/abs/2501.19392)
+
 This is the supplementary code for [Cache Me If You Must: Adaptive Key-Value Quantization for Large Language Models](https://arxiv.org/abs/2501.19392)
 
 The current code version is designed for reproducing and prototyping. Efficient inference kernels are TBU.
-
-[![arXiv](https://img.shields.io/badge/arXiv-2501.19392-b31b1b.svg)](https://arxiv.org/abs/2501.19392)
-
 
 # Installation
 
