@@ -1,10 +1,10 @@
 # AQUA-KV
 
-This is the supplementary code for Cache Me If You Must: Adaptive Key-Value Quantization for Large Language Models
+[![arXiv](https://img.shields.io/badge/arXiv-2501.19392-b31b1b.svg)](https://arxiv.org/abs/2501.19392)
+
+This is the supplementary code for `Cache Me If You Must: Adaptive Key-Value Quantization for Large Language Models`.
 
 The current code version is designed for reproducing and prototyping. Efficient inference kernels are TBU.
-
-
 
 # Installation
 
@@ -63,3 +63,14 @@ python evaluate_longbench.py --model $LONGBENCH_MODEL_NAME --predictors_input_pa
  --datasets=$LONGBENCH_DATASETS --out_path=$LONGBENCH_OUT_PATH --quantize
  
 ```
+
+
+# Grid Choise
+
+Code supports several grids for HIGGS quantization:
+
+1. Fast GPU supproted grids: EDENN_D = 2, EDENN_N = 16, 64, 256 for quantization in 2, 3, 4 bits correspondingly
+
+2. Grids without fast GPU support, but with slightly better quality:
+    * EDENN_D = 4, EDENN_N = 256
+    * EDENN_D = 8, EDENN_N = 65536
