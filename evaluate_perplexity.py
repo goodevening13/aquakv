@@ -121,6 +121,11 @@ def make_arg_parser():
         default=None,
         help="Path to saved trained predictors for Key and Values",
     )
+    parser.add_argument(
+        "--not_quantize_first_layer",
+        action="store_true",
+        help="If this flag is set, then the first layer will not be quantize.",
+    )
     parser.add_argument("--prefix_size",
                         type=int,
                         default=4,
@@ -162,6 +167,11 @@ def main():
             cache_factory = None
         else:
             quantizer = HiggsQuantizer(args.hadamard_groupsize, args.edenn_d, args.edenn_n)
+            if args.not_quantize_first_layer:
+                first_layer_quantizer = None
+            else:
+                first_layer_quantizer = HiggsQuantizer(args.hadamard_groupsize, 2, 256)
+       
             cache_factory = lambda: TreatPrefixSeparately(
                 prefix_size=args.prefix_size,
                 prefix_cache=transformers.DynamicCache(),
@@ -173,7 +183,8 @@ def main():
                         SingleChunkQuantizedCacheWithPredictors,
                         quantizer=quantizer,
                         key_predictors=key_predictors,
-                        value_predictors=value_predictors
+                        value_predictors=value_predictors,
+                        first_layer_quantizer = first_layer_quantizer
                     )
                 )
             )

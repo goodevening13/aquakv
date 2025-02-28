@@ -135,12 +135,13 @@ class PredictorHiggsCache(transformers.cache_utils.Cache):
 class SingleChunkQuantizedCacheWithPredictors(transformers.cache_utils.Cache):
     """A **write-once** cache that uses cumulative predictors; assumes that inputs are pre-grouped"""
 
-    def __init__(self, *, quantizer: QuantizerBase,
+    def __init__(self, *, quantizer: QuantizerBase,first_layer_quantizer: QuantizerBase = None,
                  key_predictors: Optional[Dict[int, nn.Module]] = None,
                  value_predictors: Optional[Dict[int, nn.Module]] = None,
                  move_predictors_to_devices: bool = True):
         super().__init__()
         self.quantizer, self.key_predictors, self.value_predictors = quantizer, key_predictors, value_predictors
+        self.first_layer_quantizer = first_layer_quantizer
         self.key_states_cache, self.value_states_cache, self.device_map = dict(), dict(), dict()
         self.previous_key_reconstruction = self.previous_value_reconstruction = None
         self.next_layer_idx = 0
@@ -205,8 +206,22 @@ class SingleChunkQuantizedCacheWithPredictors(transformers.cache_utils.Cache):
             key_states, value_states = map(combine_heads, (key_states, value_states))
 
             if layer_idx == 0:
-                reconstructed_key_states = self.key_states_cache[0] = key_states
-                reconstructed_value_states = self.value_states_cache[0] = value_states
+                if self.first_layer_quantizer:
+                    ### hacking to not debug
+                    self.quantized_first_layer_k_cache = self.first_layer_quantizer.quantize(
+                        (key_states).flatten(0, -2))
+                    reconstructed_key_states = self.first_layer_quantizer.dequantize(
+                        self.quantized_first_layer_k_cache).view_as(key_states).to(dtype=dtype, device=device)
+                    self.key_states_cache[0] = reconstructed_key_states
+
+                    self.quantized_first_layer_v_cache = self.first_layer_quantizer.quantize(
+                        (value_states).flatten(0, -2))
+                    reconstructed_value_states = self.first_layer_quantizer.dequantize(
+                        self.quantized_first_layer_v_cache).view_as(value_states).to(dtype=dtype, device=device)
+                    self.value_states_cache[0] = reconstructed_value_states
+                else:
+                    reconstructed_key_states = self.key_states_cache[0] = key_states
+                    reconstructed_value_states = self.value_states_cache[0] = value_states
             else:
                 predicted_key_states = self.predict_next_key_states().to(device)
                 self.key_states_cache[layer_idx] = self.quantizer.quantize(

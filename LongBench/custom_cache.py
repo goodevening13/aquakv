@@ -11,7 +11,8 @@ def get_aqua_cache(device, hadamard_groupsize: int, edenn_n: int, edenn_d: int,
                    prefix_size: int = 4,
                    key_predictors: Optional[Dict[int, nn.Module]] = None,
                    value_predictors: Optional[Dict[int, nn.Module]] = None,
-                   quantizer_type: str = "higgs"):
+                   quantizer_type: str = "higgs",
+                   not_quantize_first_layer: bool = False):
 
 
     # transfering predictors on to correct device
@@ -31,7 +32,11 @@ def get_aqua_cache(device, hadamard_groupsize: int, edenn_n: int, edenn_d: int,
     else:
         # for the future
         raise NotImplementedError
-
+    if not_quantize_first_layer:
+        first_layer_quantizer = None
+    else:
+        first_layer_quantizer = HiggsQuantizer(hadamard_groupsize, 2, 256)
+       
     # creating cache with predictors
     cache = TreatPrefixSeparately(prefix_size=prefix_size,
                                   prefix_cache=transformers.DynamicCache(),
@@ -42,7 +47,8 @@ def get_aqua_cache(device, hadamard_groupsize: int, edenn_n: int, edenn_d: int,
                                                    SingleChunkQuantizedCacheWithPredictors,
                                                    quantizer=quantizer,
                                                    key_predictors=key_predictors,
-                                                   value_predictors=value_predictors
+                                                   value_predictors=value_predictors,
+                                                   first_layer_quantizer = first_layer_quantizer
                                                  )
                                             ))
     return cache

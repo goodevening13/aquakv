@@ -63,6 +63,11 @@ def parse_args(args=None):
                         help="The number of first tokens that will not be quantized, because of attention sink.")
     parser.add_argument("--recent_buffer_size", type=int, default=128,
                         help="Accumulate at least this many tokens before quantizing.")
+    parser.add_argument(
+        "--not_quantize_first_layer",
+        action="store_true",
+        help="If this flag is set, then the first layer will not be quantize.",
+    )
 
     parser.add_argument('-e', dest='e', action='store_true')
     parser.add_argument('-a', dest='all', action='store_true', help="Evaluate on slow tasks as well")
@@ -306,7 +311,8 @@ if __name__ == '__main__':
                             config=transformers.AutoConfig.from_pretrained(model2path[model_name]),
                             key_predictors=key_predictors,
                             value_predictors=value_predictors,
-                            quantizer_type="higgs"
+                            quantizer_type="higgs",
+                            not_quantize_first_layer=args.not_quantize_first_layer
                             )
         else:
             custom_quantization = False
