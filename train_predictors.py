@@ -238,6 +238,12 @@ def main():
     for k, v in forward_args.items():
         forward_args[k] = v.to(args.devices[0]) if isinstance(v, torch.Tensor) else v
 
+    # this is to make it compatible with transformers 4.48>=
+    model.model.rotary_emb.to(args.devices[0])
+    forward_args["position_embeddings"] = model.model.rotary_emb.forward(
+        inps[0][:1].to(args.devices[0]), torch.arange(0, args.model_seqlen).unsqueeze(0).to(args.devices[0]))
+    model.model.rotary_emb.cpu()
+
     outs = [torch.zeros_like(inp_tensor, pin_memory=inp_tensor.is_pinned()) for inp_tensor in inps]
     old_attn_keys = None
     old_attn_values = None
