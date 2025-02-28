@@ -145,7 +145,7 @@ def main():
     # loading predictors
     key_predictors, value_predictors = None, None
     if args.predictors_input_path:
-        key_values_predictors = torch.load(args.predictors_input_path)
+        key_values_predictors = torch.load(args.predictors_input_path, weights_only=False)
         key_predictors, value_predictors = key_values_predictors["key_predictors"], key_values_predictors["value_predictors"]
         [key_predictors[i].to(device) for i in key_predictors]
         [value_predictors[i].to(device) for i in value_predictors]

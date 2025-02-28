@@ -296,7 +296,7 @@ if __name__ == '__main__':
         if args.quantize:
             custom_quantization = True
             if args.predictors_input_path:
-                key_values = torch.load(args.predictors_input_path)
+                key_values = torch.load(args.predictors_input_path, weights_only=False)
                 key_predictors, value_predictors = key_values["key_predictors"], key_values["value_predictors"]
             else:
                 key_predictors = None
