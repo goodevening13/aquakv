@@ -1,6 +1,7 @@
 """
 Base vector quantizer class to be used for training and inference with KV cache predictors and its instances (e.g HIGGS)
 """
+import math
 from typing import TypeVar, Union
 import torch
 from fast_hadamard_transform import hadamard_transform
@@ -21,17 +22,28 @@ class QuantizerBase:
 QuantizedTensor = namedtuple("QuantizedTensor", ["idx", "scales"])
 
 class BetterHiggsQuantizer(QuantizerBase):
-    def __init__(self, hadamard_groupsize: int, codeword_dim: int, n_codewords: int, device: Union[str, torch.device], chunk_size: int = 64) -> None:
+    def __init__(self, hadamard_groupsize: int, codeword_dim: int, n_codewords: int, device: Union[str, torch.device], channel_size: int = 1024, chunk_size: int = 64) -> None:
         """
         chunk_size is used to avoid memory demanding matmul and split the input into chunk of size chunk_size to perform multiple smaller matmuls
         """
         super().__init__()
         self.hadamard_groupsize = hadamard_groupsize
         self.grid = GRIDS[codeword_dim][n_codewords].to(device).T # grid of shape [codeword_dim, n_codewords]
-        self.grid_norm =  torch.linalg.norm(self.grid, dim=0).square()
+        self.grid_norm =  torch.linalg.norm(self.grid, dim=0).square() # TODO use get_grid/get_grid_norm
         self.d = codeword_dim
         self.n = n_codewords
         self.chunk_size = chunk_size
+        self.for_reverse_hadamard = self.get_matrix_for_reverse_hadamard(channel_size, device=device)
+
+    def get_matrix_for_reverse_hadamard(self, channel_size, device):
+        x = torch.eye(channel_size, device=device, dtype=torch.half)
+        x = pad_to_block(x, [-1], self.hadamard_groupsize)
+        mult = x.shape[-1] // self.hadamard_groupsize
+        x = x.reshape(x.shape[:-1] + (mult, self.hadamard_groupsize))
+        x = hadamard_transform(x, scale=1 / math.sqrt(self.hadamard_groupsize))
+        
+        x = x.reshape(x.shape[:-2] + (mult * self.hadamard_groupsize,))
+        return x
 
     def quantize(self, x: torch.Tensor) -> QuantizedTensor:
         """
@@ -68,9 +80,11 @@ class BetterHiggsQuantizer(QuantizerBase):
         # Cut the padded values
         x = x[..., :self.hadamard_groupsize]
 
-        x = (x * scales.unsqueeze(dim=2)).flatten(start_dim=1)  # [b, mult, C / mult] * [b, mult, 1] => [b, C]
+        x = (x * scales.unsqueeze(dim=2)).flatten(start_dim=1).half()  # [b, mult, C / mult] * [b, mult, 1] => [b, C]
 
-        return x.half()
+        x = torch.nn.functional.linear(self.for_reverse_hadamard, x / math.sqrt(self.hadamard_groupsize)).T.detach().contiguous().clone().to(device=x.device, dtype=x.dtype)
+
+        return x    
 
 
 class HiggsQuantizer(QuantizerBase):

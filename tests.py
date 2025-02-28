@@ -32,6 +32,17 @@ def test_BetterHiggsQuantizer():
     reference_output = reference_quantizer.quantize_dequantize(a)
     output = quantizer.quantize_dequantize(a)
 
+    # predicted_idx = torch.load("./predicted_idx.pt", map_location='cpu')
+    # predicted_scales = torch.load("./predicted_scales.pt", map_location='cpu')
+
+    # reference_idx = torch.load("./reference_idx.pt", map_location='cpu')
+    # reference_scales = torch.load("./reference_scales.pt", map_location='cpu')
+
+    # print(predicted_idx.shape, reference_idx.shape)
+    # print(torch.allclose(predicted_idx.long(), reference_idx))
+    # print(predicted_scales.shape, reference_scales.shape)
+    # print(torch.max(torch.abs(predicted_scales - reference_scales)))
+
     print(reference_output.shape, output.shape)
     print(torch.max(torch.abs(reference_output - output)), torch.max(torch.abs(reference_output - output) / torch.abs(reference_output)))
 
