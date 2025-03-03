@@ -124,7 +124,7 @@ def make_arg_parser():
     parser.add_argument(
         "--not_quantize_first_layer",
         action="store_true",
-        help="If this flag is set, then the first layer will not be quantize.",
+        help="If this flag is set, the first layer will not be quantized.",
     )
     parser.add_argument("--prefix_size",
                         type=int,
@@ -184,7 +184,7 @@ def main():
                         quantizer=quantizer,
                         key_predictors=key_predictors,
                         value_predictors=value_predictors,
-                        first_layer_quantizer = first_layer_quantizer
+                        first_layer_quantizer=first_layer_quantizer
                     )
                 )
             )

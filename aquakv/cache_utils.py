@@ -135,7 +135,7 @@ class PredictorHiggsCache(transformers.cache_utils.Cache):
 class SingleChunkQuantizedCacheWithPredictors(transformers.cache_utils.Cache):
     """A **write-once** cache that uses cumulative predictors; assumes that inputs are pre-grouped"""
 
-    def __init__(self, *, quantizer: QuantizerBase,first_layer_quantizer: QuantizerBase = None,
+    def __init__(self, *, quantizer: QuantizerBase, first_layer_quantizer: QuantizerBase = None,
                  key_predictors: Optional[Dict[int, nn.Module]] = None,
                  value_predictors: Optional[Dict[int, nn.Module]] = None,
                  move_predictors_to_devices: bool = True):

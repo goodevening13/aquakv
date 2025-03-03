@@ -124,7 +124,7 @@ def make_arg_parser():
     parser.add_argument(
         "--not_quantize_first_layer",
         action="store_true",
-        help="If this flag is set, then the first layer will not be quantize.",
+        help="If this flag is set, the first layer will not be quantized.",
     )
     parser.add_argument(
         "--torch_dtype",
@@ -302,14 +302,14 @@ def main():
         ### training predictor below ###
         key_predictor_inputs = list(old_attn_keys)
 
-        if layer_index==0:
+        if layer_index == 0:
             key_predictor, mse_train_keys, mse_valid_keys = None, 10000, 10000
         else:
             key_predictor, mse_train_keys, mse_valid_keys = get_predictor(args, key_predictor_inputs, attn_keys)
         
-        attn_keys = get_dequant_values(args, quantizer if layer_index!=0 else first_layer_quantizer, key_predictor, key_predictor_inputs, attn_keys)
+        attn_keys = get_dequant_values(args, quantizer if layer_index != 0 else first_layer_quantizer, key_predictor, key_predictor_inputs, attn_keys)
         del key_predictor_inputs
-        if layer_index!=0:
+        if layer_index != 0:
             key_predictors[layer_index] = key_predictor.cpu()
         train_bits_keys = - math.log(mse_train_keys) / math.log(4)
         valid_bits_keys = - math.log(mse_valid_keys) / math.log(4)
@@ -317,12 +317,12 @@ def main():
               f'| equiv.bits train: {train_bits_keys:.2f} valid: {valid_bits_keys:.2f}')
         value_predictor_inputs = [
             torch.cat([k_i, old_v_i], dim=-1) for k_i, old_v_i in zip(attn_keys, old_attn_values)]
-        if layer_index==0:
+        if layer_index == 0:
             value_predictor, mse_train_values, mse_valid_values = None, 10000,10000
         else:
             value_predictor, mse_train_values, mse_valid_values = get_predictor(args, value_predictor_inputs, attn_values)
-        attn_values = get_dequant_values(args, quantizer if layer_index!=0 else first_layer_quantizer, value_predictor, value_predictor_inputs, attn_values)
-        if layer_index!=0:
+        attn_values = get_dequant_values(args, quantizer if layer_index != 0 else first_layer_quantizer, value_predictor, value_predictor_inputs, attn_values)
+        if layer_index != 0:
             value_predictors[layer_index] = value_predictor.cpu()
         
         del value_predictor_inputs

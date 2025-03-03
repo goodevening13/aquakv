@@ -66,7 +66,7 @@ def parse_args(args=None):
     parser.add_argument(
         "--not_quantize_first_layer",
         action="store_true",
-        help="If this flag is set, then the first layer will not be quantize.",
+        help="If this flag is set, the first layer will not be quantized.",
     )
 
     parser.add_argument('-e', dest='e', action='store_true')

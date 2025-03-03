@@ -48,7 +48,7 @@ def get_aqua_cache(device, hadamard_groupsize: int, edenn_n: int, edenn_d: int,
                                                    quantizer=quantizer,
                                                    key_predictors=key_predictors,
                                                    value_predictors=value_predictors,
-                                                   first_layer_quantizer = first_layer_quantizer
+                                                   first_layer_quantizer=first_layer_quantizer
                                                  )
                                             ))
     return cache
