@@ -6,7 +6,7 @@ from torch import nn as nn
 from tqdm import tqdm
 from transformers import DynamicCache
 
-from aquakv.quantizers import HiggsQuantizer
+from aquakv.quantizers import BetterHiggsQuantizer, HiggsQuantizer
 from aquakv.cache_utils import TreatPrefixSeparately, PredictorHiggsCache, SingleChunkQuantizedCacheWithPredictors
 from functools import partial
 from datasets import load_dataset
@@ -161,7 +161,14 @@ def main():
         if args.no_quant:
             cache_factory = None
         else:
-            quantizer = HiggsQuantizer(args.hadamard_groupsize, args.edenn_d, args.edenn_n)
+            quantizer = BetterHiggsQuantizer(
+                    args.hadamard_groupsize,
+                    args.edenn_d,
+                    args.edenn_n,
+                    device=device,
+                    dtype=config.torch_dtype,
+                    channel_size=config.head_dim * config.num_key_value_heads
+            )
             cache_factory = lambda: TreatPrefixSeparately(
                 prefix_size=args.prefix_size,
                 prefix_cache=transformers.DynamicCache(),

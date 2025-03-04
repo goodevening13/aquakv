@@ -5,7 +5,7 @@ import math
 from typing import TypeVar, Union
 import torch
 from fast_hadamard_transform import hadamard_transform
-from .edenn import higgs_quantize_dequantize, pad_to_block, HadLinear, GRIDS
+from .edenn import get_grid, get_grid_norms_squared, higgs_quantize_dequantize, pad_to_block, HadLinear, GRIDS
 from optimum.quanto import MaxOptimizer, qint2, qint4, quantize_weight
 from collections import namedtuple
 
@@ -22,18 +22,19 @@ class QuantizerBase:
 QuantizedTensor = namedtuple("QuantizedTensor", ["idx", "scales"])
 
 class BetterHiggsQuantizer(QuantizerBase):
-    def __init__(self, hadamard_groupsize: int, codeword_dim: int, n_codewords: int, device: Union[str, torch.device], channel_size: int = 1024, chunk_size: int = 64) -> None:
+    def __init__(self, hadamard_groupsize: int, codeword_dim: int, n_codewords: int, device: Union[str, torch.device], dtype, channel_size: int = 1024, chunk_size: int = 64) -> None:
         """
         chunk_size is used to avoid memory demanding matmul and split the input into chunk of size chunk_size to perform multiple smaller matmuls
         """
         super().__init__()
         self.hadamard_groupsize = hadamard_groupsize
-        self.grid = GRIDS[codeword_dim][n_codewords].to(device).T # grid of shape [codeword_dim, n_codewords]
-        self.grid_norm =  torch.linalg.norm(self.grid, dim=0).square() # TODO use get_grid/get_grid_norm
+        self.grid = get_grid(codeword_dim, n_codewords, device).T.to(dtype=dtype) # grid of shape [codeword_dim, n_codewords]
+        self.grid_norm = get_grid_norms_squared(codeword_dim, n_codewords, device).to(dtype=dtype)
         self.d = codeword_dim
         self.n = n_codewords
         self.chunk_size = chunk_size
         self.for_reverse_hadamard = self.get_matrix_for_reverse_hadamard(channel_size, device=device)
+        self.device = device
 
     def get_matrix_for_reverse_hadamard(self, channel_size, device):
         x = torch.eye(channel_size, device=device, dtype=torch.half)

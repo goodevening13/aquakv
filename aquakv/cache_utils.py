@@ -228,7 +228,7 @@ class SingleChunkQuantizedCacheWithPredictors(transformers.cache_utils.Cache):
                 device, dtype = reconstructed_key_states.device, reconstructed_key_states.dtype
             else:
                 dtype = key_states.dtype
-                device = next(iter(self.key_states_cache[self.next_layer_idx].state_dict().values())).device
+                device = self.quantizer.device
                 reconstructed_key_states = self.predict_next_key_states().to(device)
                 reconstructed_key_states += self.quantizer.dequantize(
                     self.key_states_cache[layer_idx]).view_as(reconstructed_key_states).to(dtype=dtype, device=device)
