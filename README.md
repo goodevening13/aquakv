@@ -65,12 +65,15 @@ python evaluate_longbench.py --model $LONGBENCH_MODEL_NAME --predictors_input_pa
 ```
 
 
-# Grid Choise
+# Choosing grid parameters for HIGGS quantizer
 
 Code supports several grids for HIGGS quantization:
 
-1. Fast GPU supproted grids: EDENN_D = 2, EDENN_N = 16, 64, 256 for quantization in 2, 3, 4 bits correspondingly
+1. Grids that support efficient kernels in [FLUTE](https://github.com/HanGuo97/flute): EDENN_D = 2, EDENN_N = 16, 64, 256 for quantization in 2, 3, 4 bits respectively
 
 2. Grids without fast GPU support, but with slightly better quality:
-    * EDENN_D = 4, EDENN_N = 256
-    * EDENN_D = 8, EDENN_N = 65536
+    * EDENN_D = 4, EDENN_N = 256   (from [HIGGS](https://arxiv.org/abs/2411.17525))
+    * EDENN_D = 8, EDENN_N = 65536 (from [quip#](https://arxiv.org/pdf/2402.04396))
+
+Additional grid configurations (e.g. d=6 n=4096) may be generated with [this notebook](https://gist.github.com/galqiwi/45ed6e56dc7495dfea82ae3b01de8bdb).
+   
