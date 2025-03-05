@@ -72,19 +72,3 @@ def pad_to_block(tensor, dims, had_block_size, value=0):
         pad_dims[-2 * dim - 1] = delta
 
     return F.pad(tensor, pad_dims, "constant", value)
-
-
-class HadLinear(nn.Module):
-    def __init__(self, weight, had_block_size=1024):
-        super().__init__()
-        self.register_buffer('had_block_size', torch.tensor(0))
-        self.had_block_size = torch.tensor(had_block_size)
-        self.weight = nn.Parameter(weight / math.sqrt(had_block_size))
-
-    def forward(self, input):
-        input = pad_to_block(input, [-1], self.had_block_size)
-        mult = input.shape[-1] // self.had_block_size
-        input = input.reshape(input.shape[:-1] + (mult, self.had_block_size))
-        input = hadamard_transform(input, scale=1 / math.sqrt(self.had_block_size))
-        input = input.reshape(input.shape[:-2] + (mult * self.had_block_size,))
-        return F.linear(input, self.weight)
