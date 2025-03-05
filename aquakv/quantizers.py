@@ -28,23 +28,14 @@ class BetterHiggsQuantizer(QuantizerBase):
         """
         super().__init__()
         self.hadamard_groupsize = hadamard_groupsize
+        self.channel_size = channel_size
         self.grid = get_grid(codeword_dim, n_codewords, device).T.to(dtype=dtype) # grid of shape [codeword_dim, n_codewords]
         self.grid_norm = get_grid_norms_squared(codeword_dim, n_codewords, device).to(dtype=dtype)
         self.d = codeword_dim
         self.n = n_codewords
         self.chunk_size = chunk_size
-        self.for_reverse_hadamard = self.get_matrix_for_reverse_hadamard(channel_size, device=device)
+        self.hadamard_scale = 1 / hadamard_groupsize
         self.device = device
-
-    def get_matrix_for_reverse_hadamard(self, channel_size, device):
-        x = torch.eye(channel_size, device=device, dtype=torch.half)
-        x = pad_to_block(x, [-1], self.hadamard_groupsize)
-        mult = x.shape[-1] // self.hadamard_groupsize
-        x = x.reshape(x.shape[:-1] + (mult, self.hadamard_groupsize))
-        x = hadamard_transform(x, scale=1 / math.sqrt(self.hadamard_groupsize))
-        
-        x = x.reshape(x.shape[:-2] + (mult * self.hadamard_groupsize,))
-        return x
 
     def quantize(self, x: torch.Tensor) -> QuantizedTensor:
         """
@@ -81,11 +72,11 @@ class BetterHiggsQuantizer(QuantizerBase):
         # Cut the padded values
         x = x[..., :self.hadamard_groupsize]
 
-        x = (x * scales.unsqueeze(dim=2)).flatten(start_dim=1).half()  # [b, mult, C / mult] * [b, mult, 1] => [b, C]
-
-        x = torch.nn.functional.linear(self.for_reverse_hadamard, x / math.sqrt(self.hadamard_groupsize)).T.detach().contiguous().clone().to(device=x.device, dtype=x.dtype)
-
-        return x    
+        x = (x * scales.unsqueeze(dim=2)).half()  # [b, mult, C / mult] * [b, mult, 1]
+        
+        x = hadamard_transform(x, scale=self.hadamard_scale).flatten(start_dim=1)  # [b, mult, C / mult] => [b, C]
+        
+        return x[:, :self.channel_size]
 
 
 class HiggsQuantizer(QuantizerBase):

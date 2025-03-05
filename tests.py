@@ -25,7 +25,7 @@ def test_BetterHiggsQuantizer():
     fix_seed(seed)
 
     reference_quantizer = HiggsQuantizer(hadamard_groupsize, edenn_d, edenn_n)
-    quantizer = BetterHiggsQuantizer(hadamard_groupsize, edenn_d, edenn_n, device)
+    quantizer = BetterHiggsQuantizer(hadamard_groupsize, edenn_d, edenn_n, device, dtype=torch.float32)
 
     input_shape = (8192, 1024)
     a = torch.randn(input_shape, device=device)
@@ -44,7 +44,11 @@ def test_BetterHiggsQuantizer():
     # print(torch.max(torch.abs(predicted_scales - reference_scales)))
 
     print(reference_output.shape, output.shape)
+    idx = torch.argmax(torch.abs(reference_output - output) / torch.abs(reference_output))
+    print("max abs diff", torch.abs(reference_output - output)[idx // 1024, idx % 1024], reference_output[idx // 1024, idx % 1024], output[idx // 1024, idx % 1024])
     print(torch.max(torch.abs(reference_output - output)), torch.max(torch.abs(reference_output - output) / torch.abs(reference_output)))
+    print("ref out", reference_output)
+    print("my  out", output)
 
 if __name__ == "__main__":
     test_BetterHiggsQuantizer()
