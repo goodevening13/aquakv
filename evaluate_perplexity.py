@@ -131,6 +131,8 @@ def make_arg_parser():
                         default=4,
                         help="The number of first tokens that will not be quantized, because of attention sink.")
     parser.add_argument("--no_quant", action="store_true", help="Do not quantize.")
+    
+    parser.add_argument("--better_higgs_quantizer", action="store_true", help="use new class")
 
     return parser
 
@@ -162,15 +164,28 @@ def main():
     testenc = tokenizer("\n\n".join(testdata["text"]), return_tensors="pt")['input_ids']
     step_size = args.chunk_size
 
+    if args.better_higgs_quantizer:
+        print("using new quantize")
+        quantizer_type = BetterHiggsQuantizer
+        quantizer_kwargs = dict(
+            device=device,
+            dtype=config.torch_dtype,
+            channel_size=config.head_dim * config.num_key_value_heads
+        )
+    else:
+        print("using old quantizer")
+        quantizer_type = HiggsQuantizer
+        quantizer_kwargs = {}
+
     with torch.no_grad():
         if args.no_quant:
             cache_factory = None
         else:
-            quantizer = HiggsQuantizer(args.hadamard_groupsize, args.edenn_d, args.edenn_n)
+            quantizer = quantizer_type(args.hadamard_groupsize, args.edenn_d, args.edenn_n, **quantizer_kwargs)
             if args.not_quantize_first_layer:
                 first_layer_quantizer = None
             else:
-                first_layer_quantizer = HiggsQuantizer(args.hadamard_groupsize, 2, 256)
+                first_layer_quantizer = quantizer_type(args.hadamard_groupsize, 2, 256, **quantizer_kwargs)
 
             cache_factory = lambda: TreatPrefixSeparately(
                 prefix_size=args.prefix_size,

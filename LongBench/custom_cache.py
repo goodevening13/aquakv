@@ -1,7 +1,7 @@
 import torch.nn as nn
 import transformers
 from typing import Optional, Dict
-from aquakv.quantizers import HiggsQuantizer
+from aquakv.quantizers import BetterHiggsQuantizer, HiggsQuantizer
 from aquakv.cache_utils import TreatPrefixSeparately, PredictorHiggsCache, SingleChunkQuantizedCacheWithPredictors
 from functools import partial
 
@@ -26,16 +26,25 @@ def get_aqua_cache(device, hadamard_groupsize: int, edenn_n: int, edenn_d: int,
             value_predictors[i].to(device)
 
     # creating higgs quantizer
+    quantizer_kwargs = dict(
+        device=device,
+        dtype=config.torch_dtype,
+        channel_size=config.head_dim * config.num_key_value_heads
+    )
     if quantizer_type == "higgs":
-        quantizer = HiggsQuantizer(hadamard_groupsize=hadamard_groupsize,
-                                   edenn_d=edenn_d, edenn_n=edenn_n)
+        quantizer = BetterHiggsQuantizer(
+            hadamard_groupsize=hadamard_groupsize,
+            codeword_dim=edenn_d, 
+            n_codewords=edenn_n,
+            **quantizer_kwargs
+        )
     else:
         # for the future
         raise NotImplementedError
     if not_quantize_first_layer:
         first_layer_quantizer = None
     else:
-        first_layer_quantizer = HiggsQuantizer(hadamard_groupsize, 2, 256)
+        first_layer_quantizer = BetterHiggsQuantizer(hadamard_groupsize, 2, 256, **quantizer_kwargs)
        
     # creating cache with predictors
     cache = TreatPrefixSeparately(prefix_size=prefix_size,

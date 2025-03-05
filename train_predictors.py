@@ -8,7 +8,7 @@ import transformers
 from tqdm import trange
 
 from aquakv import datautils, modelutils
-from aquakv.quantizers import QuantizerBase, HiggsQuantizer
+from aquakv.quantizers import BetterHiggsQuantizer, QuantizerBase, HiggsQuantizer
 from aquakv.linear_utils import fit_linear_regression
 
 
@@ -200,6 +200,8 @@ def make_arg_parser():
         help="Path to save trained predictors for Key and Values",
     )
 
+    parser.add_argument("--better_higgs_quantizer", action="store_true", help="use new class")
+
     return parser
 
 
@@ -226,6 +228,7 @@ def main():
         args.model_name, torch_dtype=args.torch_dtype, low_cpu_mem_usage=True,
         use_cache=False
     )
+    config = transformers.AutoConfig.from_pretrained(args.model_name)
 
     data = datautils.get_loaders(
         args.dataset,
@@ -235,12 +238,25 @@ def main():
         seqlen=args.model_seqlen,
     )
 
-    quantizer = HiggsQuantizer(args.hadamard_groupsize, args.edenn_d, args.edenn_n)
+    if args.better_higgs_quantizer:
+        print("using new quantize")
+        quantizer_type = BetterHiggsQuantizer
+        quantizer_kwargs = dict(
+            device=args.devices[0],
+            dtype=config.torch_dtype,
+            channel_size=config.head_dim * config.num_key_value_heads
+        )
+    else:
+        print("using old quantizer")
+        quantizer_type = HiggsQuantizer
+        quantizer_kwargs = {}
+
+    quantizer = quantizer_type(args.hadamard_groupsize, args.edenn_d, args.edenn_n, **quantizer_kwargs)
     
     if args.not_quantize_first_layer:
         first_layer_quantizer = None
     else:
-        first_layer_quantizer = HiggsQuantizer(args.hadamard_groupsize, 2, 256)
+        first_layer_quantizer = quantizer_type(args.hadamard_groupsize, 2, 256, **quantizer_kwargs)
        
     # Calibration: propagate a set of inputs through one layer at a time, train predictors as we go
     layers = modelutils.get_layers(model)
