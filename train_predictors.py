@@ -64,7 +64,10 @@ def get_dequant_values(
     for i in trange(len(predictor_inputs), desc='get_dequant_values', leave=False):
         predictor_inputs_i = predictor_inputs[i].to(args.devices[0], non_blocking=True)
         values_i = values[i].to(args.devices[0], non_blocking=True)
-        values_pred_i = predictor(predictor_inputs_i)
+        if predictor is None:
+            values_pred_i = torch.zeros_like(values_i, device=values_i.device)
+        else:
+            values_pred_i = predictor(predictor_inputs_i)
         values_delta = values_i - values_pred_i
         values_delta_dequant_i = quantizer.quantize_dequantize(values_delta.flatten(0, -2)).reshape(values_delta.shape)
         values_dequantized.append(
@@ -117,6 +120,11 @@ def make_arg_parser():
         "--edenn_n",
         type=int,
         help="The grid size n for HIGGS.",
+    )
+    parser.add_argument(
+        "--not_quantize_first_layer",
+        action="store_true",
+        help="If this flag is set, the first layer will not be quantized.",
     )
     parser.add_argument(
         "--torch_dtype",
@@ -228,7 +236,12 @@ def main():
     )
 
     quantizer = HiggsQuantizer(args.hadamard_groupsize, args.edenn_d, args.edenn_n)
-
+    
+    if args.not_quantize_first_layer:
+        first_layer_quantizer = None
+    else:
+        first_layer_quantizer = HiggsQuantizer(args.hadamard_groupsize, 2, 256)
+       
     # Calibration: propagate a set of inputs through one layer at a time, train predictors as we go
     layers = modelutils.get_layers(model)
 
@@ -237,6 +250,12 @@ def main():
 
     for k, v in forward_args.items():
         forward_args[k] = v.to(args.devices[0]) if isinstance(v, torch.Tensor) else v
+
+    # this is to make it compatible with transformers 4.48>=
+    model.model.rotary_emb.to(args.devices[0])
+    forward_args["position_embeddings"] = model.model.rotary_emb.forward(
+        inps[0][:1].to(args.devices[0]), torch.arange(0, args.model_seqlen).unsqueeze(0).to(args.devices[0]))
+    model.model.rotary_emb.cpu()
 
     outs = [torch.zeros_like(inp_tensor, pin_memory=inp_tensor.is_pinned()) for inp_tensor in inps]
     old_attn_keys = None
@@ -276,23 +295,36 @@ def main():
         if layer_index == 0:
             old_attn_keys = attn_keys
             old_attn_values = attn_values
-            continue
+            if args.not_quantize_first_layer:
+                print("Not quantizing first layer")
+                continue
 
         ### training predictor below ###
         key_predictor_inputs = list(old_attn_keys)
-        key_predictor, mse_train_keys, mse_valid_keys = get_predictor(args, key_predictor_inputs, attn_keys)
-        attn_keys = get_dequant_values(args, quantizer, key_predictor, key_predictor_inputs, attn_keys)
+
+        if layer_index == 0:
+            key_predictor, mse_train_keys, mse_valid_keys = None, 10000, 10000
+        else:
+            key_predictor, mse_train_keys, mse_valid_keys = get_predictor(args, key_predictor_inputs, attn_keys)
+        
+        attn_keys = get_dequant_values(args, quantizer if layer_index != 0 else first_layer_quantizer, key_predictor, key_predictor_inputs, attn_keys)
         del key_predictor_inputs
-        key_predictors[layer_index] = key_predictor.cpu()
+        if layer_index != 0:
+            key_predictors[layer_index] = key_predictor.cpu()
         train_bits_keys = - math.log(mse_train_keys) / math.log(4)
         valid_bits_keys = - math.log(mse_valid_keys) / math.log(4)
         print(f'{layer_index=}\tPREDICTOR_KEYS   \t| relMSE train: {mse_train_keys:.4f} valid: {mse_valid_keys:.4f} '
               f'| equiv.bits train: {train_bits_keys:.2f} valid: {valid_bits_keys:.2f}')
         value_predictor_inputs = [
             torch.cat([k_i, old_v_i], dim=-1) for k_i, old_v_i in zip(attn_keys, old_attn_values)]
-        value_predictor, mse_train_values, mse_valid_values = get_predictor(args, value_predictor_inputs, attn_values)
-        attn_values = get_dequant_values(args, quantizer, value_predictor, value_predictor_inputs, attn_values)
-        value_predictors[layer_index] = value_predictor.cpu()
+        if layer_index == 0:
+            value_predictor, mse_train_values, mse_valid_values = None, 10000,10000
+        else:
+            value_predictor, mse_train_values, mse_valid_values = get_predictor(args, value_predictor_inputs, attn_values)
+        attn_values = get_dequant_values(args, quantizer if layer_index != 0 else first_layer_quantizer, value_predictor, value_predictor_inputs, attn_values)
+        if layer_index != 0:
+            value_predictors[layer_index] = value_predictor.cpu()
+        
         del value_predictor_inputs
         train_bits_values = - math.log(mse_train_values) / math.log(4)
         valid_bits_values = - math.log(mse_valid_values) / math.log(4)
