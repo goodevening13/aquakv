@@ -53,16 +53,6 @@ def entropy(idx):
     return -torch.sum(counts / len(idx) * torch.log2(counts / len(idx))).item()
 
 
-def higgs_quantize(x, dim, size):
-    assert size <= 256
-    return torch.argmax(2 * x @ get_grid(dim, size, x.device).T - get_grid_norms_squared(dim, size, x.device), dim=-1).to(torch.uint8)
-
-
-def higgs_quantize_dequantize(x, dim, size):
-    idx = torch.argmax(2 * x @ get_grid(dim, size, x.device).T - get_grid_norms_squared(dim, size, x.device), dim=-1)
-    return get_grid(dim, size, x.device)[idx]
-
-
 def pad_to_block(tensor, dims, had_block_size, value=0):
     pad_dims = [0 for _ in range(2 * len(tensor.shape))]
     for dim in dims:

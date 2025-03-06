@@ -131,7 +131,7 @@ def make_arg_parser():
                         default=4,
                         help="The number of first tokens that will not be quantized, because of attention sink.")
     parser.add_argument("--no_quant", action="store_true", help="Do not quantize.")
-    
+
     return parser
 
 
@@ -164,8 +164,6 @@ def main():
 
     common_quantizer_kwargs = dict(
         hadamard_groupsize=args.hadamard_groupsize,
-        device=device,
-        dtype=config.torch_dtype,
         channel_size=config.head_dim * config.num_key_value_heads
     )
 

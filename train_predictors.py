@@ -238,8 +238,6 @@ def main():
 
     common_quantizer_kwargs = dict(
         hadamard_groupsize = args.hadamard_groupsize, 
-        device=args.devices[0], 
-        dtype=config.torch_dtype,
         channel_size=config.head_dim * config.num_key_value_heads
     )
 
