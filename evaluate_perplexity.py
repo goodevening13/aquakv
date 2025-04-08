@@ -162,16 +162,29 @@ def main():
     testenc = tokenizer("\n\n".join(testdata["text"]), return_tensors="pt")['input_ids']
     step_size = args.chunk_size
 
+    common_quantizer_kwargs = dict(
+        hadamard_groupsize=args.hadamard_groupsize,
+        channel_size=config.head_dim * config.num_key_value_heads
+    )
+
     with torch.no_grad():
         if args.no_quant:
             cache_factory = None
         else:
-            quantizer = HiggsQuantizer(args.hadamard_groupsize, args.edenn_d, args.edenn_n)
+            quantizer = HiggsQuantizer(
+                codeword_dim=args.edenn_d, 
+                n_codewords=args.edenn_n, 
+                **common_quantizer_kwargs
+            )
             if args.not_quantize_first_layer:
                 first_layer_quantizer = None
             else:
-                first_layer_quantizer = HiggsQuantizer(args.hadamard_groupsize, 2, 256)
-       
+                first_layer_quantizer = HiggsQuantizer(
+                    codeword_dim=2, 
+                    n_codewords=256, 
+                    **common_quantizer_kwargs
+                )
+
             cache_factory = lambda: TreatPrefixSeparately(
                 prefix_size=args.prefix_size,
                 prefix_cache=transformers.DynamicCache(),

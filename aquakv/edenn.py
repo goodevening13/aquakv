@@ -53,16 +53,6 @@ def entropy(idx):
     return -torch.sum(counts / len(idx) * torch.log2(counts / len(idx))).item()
 
 
-def higgs_quantize(x, dim, size):
-    assert size <= 256
-    return torch.argmax(2 * x @ get_grid(dim, size, x.device).T - get_grid_norms_squared(dim, size, x.device), dim=-1).to(torch.uint8)
-
-
-def higgs_quantize_dequantize(x, dim, size):
-    idx = torch.argmax(2 * x @ get_grid(dim, size, x.device).T - get_grid_norms_squared(dim, size, x.device), dim=-1)
-    return get_grid(dim, size, x.device)[idx]
-
-
 def pad_to_block(tensor, dims, had_block_size, value=0):
     pad_dims = [0 for _ in range(2 * len(tensor.shape))]
     for dim in dims:
@@ -72,19 +62,3 @@ def pad_to_block(tensor, dims, had_block_size, value=0):
         pad_dims[-2 * dim - 1] = delta
 
     return F.pad(tensor, pad_dims, "constant", value)
-
-
-class HadLinear(nn.Module):
-    def __init__(self, weight, had_block_size=1024):
-        super().__init__()
-        self.register_buffer('had_block_size', torch.tensor(0))
-        self.had_block_size = torch.tensor(had_block_size)
-        self.weight = nn.Parameter(weight / math.sqrt(had_block_size))
-
-    def forward(self, input):
-        input = pad_to_block(input, [-1], self.had_block_size)
-        mult = input.shape[-1] // self.had_block_size
-        input = input.reshape(input.shape[:-1] + (mult, self.had_block_size))
-        input = hadamard_transform(input, scale=1 / math.sqrt(self.had_block_size))
-        input = input.reshape(input.shape[:-2] + (mult * self.had_block_size,))
-        return F.linear(input, self.weight)

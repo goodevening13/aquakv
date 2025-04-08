@@ -226,6 +226,7 @@ def main():
         args.model_name, torch_dtype=args.torch_dtype, low_cpu_mem_usage=True,
         use_cache=False
     )
+    config = transformers.AutoConfig.from_pretrained(args.model_name)
 
     data = datautils.get_loaders(
         args.dataset,
@@ -235,13 +236,26 @@ def main():
         seqlen=args.model_seqlen,
     )
 
-    quantizer = HiggsQuantizer(args.hadamard_groupsize, args.edenn_d, args.edenn_n)
+    common_quantizer_kwargs = dict(
+        hadamard_groupsize = args.hadamard_groupsize, 
+        channel_size=config.head_dim * config.num_key_value_heads
+    )
+
+    quantizer = HiggsQuantizer(
+        codeword_dim=args.edenn_d, 
+        n_codewords=args.edenn_n, 
+        **common_quantizer_kwargs
+    )
     
     if args.not_quantize_first_layer:
         first_layer_quantizer = None
     else:
-        first_layer_quantizer = HiggsQuantizer(args.hadamard_groupsize, 2, 256)
-       
+        first_layer_quantizer = HiggsQuantizer(
+            codeword_dim=2, 
+            n_codewords=256,
+            **common_quantizer_kwargs
+    )
+
     # Calibration: propagate a set of inputs through one layer at a time, train predictors as we go
     layers = modelutils.get_layers(model)
 

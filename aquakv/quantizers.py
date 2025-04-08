@@ -4,9 +4,10 @@ Base vector quantizer class to be used for training and inference with KV cache 
 from typing import TypeVar
 import torch
 from fast_hadamard_transform import hadamard_transform
-from .edenn import higgs_quantize_dequantize, pad_to_block, HadLinear
+from .edenn import get_grid, get_grid_norms_squared, pad_to_block, GRIDS
 from optimum.quanto import MaxOptimizer, qint2, qint4, quantize_weight
-
+from collections import namedtuple
+from functools import partial
 
 class QuantizerBase:
     QuantizedState = TypeVar('QuantizedState')
@@ -18,61 +19,74 @@ class QuantizerBase:
     def quantize_dequantize(self, x: torch.Tensor) -> torch.Tensor:
         return self.dequantize(self.quantize(x)).to(dtype=x.dtype, device=x.device)
 
+QuantizedTensor = namedtuple("QuantizedTensor", ["idx", "scales"])
 
 class HiggsQuantizer(QuantizerBase):
-    """
-    HIGGS vector quantization. This version is highly inefficient, but convenient for prototyping.
-    :param hadamard_groupsize: perform random hadamard transform to groups of this many vectors
-    :param edenn_d: quantization grouop dimension
-    :param edenn_n: quantization lattice size
-    """
-    def __init__(self, hadamard_groupsize: int, edenn_d: int, edenn_n: int):
+    def __init__(self, hadamard_groupsize: int, edenn_d: int, edenn_n: int, channel_size: int = 1024, chunk_size: int = 64) -> None:
+        """
+        HIGGS vector quantization.
+        :param hadamard_groupsize: perform random hadamard transform to groups of this many vectors
+        :param codeword_dim: quantization grouop dimension
+        :param n_codewords: quantization lattice size
+        :param channel_size: channel size of keys and values, used to trim padding 
+        :param chunk_size: chunk size is used to avoid memory demanding matmul and split the input into chunk to perform multiple smaller matmuls
+        """
         super().__init__()
-        self.hadamard_groupsize, self.edenn_d, self.edenn_n = hadamard_groupsize, edenn_d, edenn_n
+        self.hadamard_groupsize = hadamard_groupsize
+        self.channel_size = channel_size
+        self.grid = partial(get_grid, dim=edenn_d, size=edenn_n) # grid of shape [codeword_dim, n_codewords]
+        self.grid_norm = partial(get_grid_norms_squared, dim=edenn_d, size=edenn_n)
+        self.edenn_d = edenn_d
+        self.chunk_size = chunk_size
+        self.hadamard_scale = 1 / hadamard_groupsize
 
     @torch.no_grad()
-    def quantize(self, x: torch.Tensor):
-        return quantize_linear_weight_higgs(x, self.hadamard_groupsize, self.edenn_d, self.edenn_n)
+    def quantize(self, x: torch.Tensor) -> QuantizedTensor:
+        """
+        x.shape - [B, C]
+        """
+        batch_size = x.shape[0]
+        channel_size = x.shape[1]
+        assert channel_size == self.channel_size, "channel size from __init__ does not match the channel size of quantize argument. Make sure you create HiggsQuantizer with correct channel size"
+        device = x.device
+        x = x.to(dtype=torch.float32)
+        x = pad_to_block(x, [1], self.hadamard_groupsize)
+        mult = x.shape[1] // self.hadamard_groupsize
+        x = x.reshape(-1, mult, self.hadamard_groupsize)
+        scales = torch.linalg.norm(x, axis=-1) # [B, mult]
+        x = hadamard_transform(x) / scales[:, :, None]
+
+        x = pad_to_block(x, [2], self.edenn_d).reshape(batch_size, mult, -1, self.edenn_d)
+
+        result_idx = torch.empty((batch_size, mult, x.shape[2]), dtype=torch.uint8)
+        for i, chunk in enumerate(torch.split(x, self.chunk_size, dim=0)):
+            chunk_idx = torch.argmax(2 * chunk @ self.grid(device=device).T - self.grid_norm(device=device), dim=-1) # [B, mult, pad(pad(C)) / mult / d]
+            result_idx[i * self.chunk_size: (i + 1) * self.chunk_size] = chunk_idx
+
+        return QuantizedTensor(
+            result_idx,
+            scales
+        )
 
     @torch.no_grad()
-    def dequantize(self, quantized: HadLinear) -> torch.Tensor:
-        device = quantized.weight.device if quantized.weight.device.type == 'cuda' else 'cuda:0'
-        return quantized(torch.eye(quantized.weight.shape[1], device=device).half()).T.contiguous()
+    def dequantize(self, quantized: QuantizedTensor) -> torch.Tensor:
+        """
+        quantized.idx shape is [B, padded_d(padded_had(C)) // d]
+        quantized.scale shape is [B, padded_had(C) // hadamard_groupsize]
+        """
+        idx = quantized.idx
+        scales = quantized.scales
+        device = scales.device
+        x = self.grid(device=device)[idx.int()].flatten(start_dim=2)  # [b, mult, C / mult / d, d] -> [b, mult, C / mult]
 
-    def quantize_dequantize(self, x: torch.Tensor) -> torch.Tensor:  # note: this shortcut is likely useless :D
-        output_layer = quantize_linear_weight_higgs(x, self.hadamard_groupsize, self.edenn_d, self.edenn_n)
-        device = x.device if x.device.type == 'cuda' else 'cuda:0'
-        return output_layer(torch.eye(x.shape[1], device=device).half()
-                            ).T.detach().contiguous().clone().to(device=x.device, dtype=x.dtype)
+        # Cut the padded values
+        x = x[..., :self.hadamard_groupsize]
 
-
-@torch.no_grad()
-def quantize_linear_weight_higgs(weight: torch.Tensor, hadamard_groupsize: int, edenn_d: int, edenn_n: int):
-    """HIGGS quantization code for weights reused from https://arxiv.org/abs/2411.17525"""
-    weight = weight.to(dtype=torch.float32, device='cuda' if weight.device.type != 'cuda' else weight.device)
-    # Pad to Hadamard transform size
-    weight = pad_to_block(weight, [1], hadamard_groupsize)
-
-    # Scale and Hadamard transform
-    mult = weight.shape[1] // hadamard_groupsize
-    weight = weight.reshape(-1, mult, hadamard_groupsize)
-    scales = torch.linalg.norm(weight, axis=-1)
-    weight = hadamard_transform(weight) / scales[:, :, None]
-
-    # Pad to edenn_d and project
-    weight = pad_to_block(weight, [2], edenn_d).reshape(weight.shape[0], mult, -1, edenn_d)
-
-    for i in range(0, weight.shape[0], 64):
-        weight[i: i + 64] = higgs_quantize_dequantize(weight[i:i + 64], edenn_d, edenn_n)
-    weight = weight.reshape(weight.shape[0], mult, -1)
-
-    # Cut the padded values
-    weight = weight[..., :hadamard_groupsize]
-
-    # Unscale
-    weight = (weight * scales[:, :, None]).reshape(weight.shape[0], -1)
-
-    return HadLinear(weight.half(), hadamard_groupsize)
+        x = (x * scales.unsqueeze(dim=2)).half()  # [b, mult, C / mult] * [b, mult, 1]
+        
+        x = hadamard_transform(x, scale=self.hadamard_scale).flatten(start_dim=1)  # [b, mult, C / mult] => [b, C]
+        
+        return x[:, :self.channel_size]
 
 
 class QuantoQuantizer(QuantizerBase):
