@@ -22,7 +22,7 @@ class QuantizerBase:
 QuantizedTensor = namedtuple("QuantizedTensor", ["idx", "scales"])
 
 class HiggsQuantizer(QuantizerBase):
-    def __init__(self, hadamard_groupsize: int, codeword_dim: int, n_codewords: int, channel_size: int = 1024, chunk_size: int = 64) -> None:
+    def __init__(self, hadamard_groupsize: int, edenn_d: int, edenn_n: int, channel_size: int = 1024, chunk_size: int = 64) -> None:
         """
         HIGGS vector quantization.
         :param hadamard_groupsize: perform random hadamard transform to groups of this many vectors
@@ -34,10 +34,9 @@ class HiggsQuantizer(QuantizerBase):
         super().__init__()
         self.hadamard_groupsize = hadamard_groupsize
         self.channel_size = channel_size
-        self.grid = partial(get_grid, dim=codeword_dim, size=n_codewords) # grid of shape [codeword_dim, n_codewords]
-        self.grid_norm = partial(get_grid_norms_squared, dim=codeword_dim, size=n_codewords)
-        self.d = codeword_dim
-        self.n = n_codewords
+        self.grid = partial(get_grid, dim=edenn_d, size=edenn_n) # grid of shape [codeword_dim, n_codewords]
+        self.grid_norm = partial(get_grid_norms_squared, dim=edenn_d, size=edenn_n)
+        self.edenn_d = edenn_d
         self.chunk_size = chunk_size
         self.hadamard_scale = 1 / hadamard_groupsize
 
@@ -47,6 +46,8 @@ class HiggsQuantizer(QuantizerBase):
         x.shape - [B, C]
         """
         batch_size = x.shape[0]
+        channel_size = x.shape[1]
+        assert channel_size == self.channel_size, "channel size from __init__ does not match the channel size of quantize argument. Make sure you create HiggsQuantizer with correct channel size"
         device = x.device
         x = x.to(dtype=torch.float32)
         x = pad_to_block(x, [1], self.hadamard_groupsize)
@@ -55,7 +56,7 @@ class HiggsQuantizer(QuantizerBase):
         scales = torch.linalg.norm(x, axis=-1) # [B, mult]
         x = hadamard_transform(x) / scales[:, :, None]
 
-        x = pad_to_block(x, [2], self.d).reshape(batch_size, mult, -1, self.d)
+        x = pad_to_block(x, [2], self.edenn_d).reshape(batch_size, mult, -1, self.edenn_d)
 
         result_idx = torch.empty((batch_size, mult, x.shape[2]), dtype=torch.uint8)
         for i, chunk in enumerate(torch.split(x, self.chunk_size, dim=0)):
