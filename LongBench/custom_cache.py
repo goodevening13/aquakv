@@ -32,8 +32,8 @@ def get_aqua_cache(device, hadamard_groupsize: int, edenn_n: int, edenn_d: int,
     )
     if quantizer_type == "higgs":
         quantizer = HiggsQuantizer(
-            codeword_dim=edenn_d, 
-            n_codewords=edenn_n,
+            edenn_d=edenn_d, 
+            edenn_n=edenn_n,
             **common_quantizer_kwargs
         )
     else:
@@ -43,8 +43,8 @@ def get_aqua_cache(device, hadamard_groupsize: int, edenn_n: int, edenn_d: int,
         first_layer_quantizer = None
     else:
         first_layer_quantizer = HiggsQuantizer(
-            codeword_dim=2, 
-            n_codewords=256, 
+            edenn_d=2, 
+            edenn_n=256, 
             **common_quantizer_kwargs
         )
        
