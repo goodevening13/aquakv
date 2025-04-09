@@ -26,15 +26,15 @@ class HiggsQuantizer(QuantizerBase):
         """
         HIGGS vector quantization.
         :param hadamard_groupsize: perform random hadamard transform to groups of this many vectors
-        :param codeword_dim: quantization grouop dimension
-        :param n_codewords: quantization lattice size
+        :param edenn_d: quantization grouop dimension
+        :param edenn_n: quantization lattice size
         :param channel_size: channel size of keys and values, used to trim padding 
         :param chunk_size: chunk size is used to avoid memory demanding matmul and split the input into chunk to perform multiple smaller matmuls
         """
         super().__init__()
         self.hadamard_groupsize = hadamard_groupsize
         self.channel_size = channel_size
-        self.grid = partial(get_grid, dim=edenn_d, size=edenn_n) # grid of shape [codeword_dim, n_codewords]
+        self.grid = partial(get_grid, dim=edenn_d, size=edenn_n) # grid of shape [edenn_d, edenn_n]
         self.grid_norm = partial(get_grid_norms_squared, dim=edenn_d, size=edenn_n)
         self.edenn_d = edenn_d
         self.chunk_size = chunk_size

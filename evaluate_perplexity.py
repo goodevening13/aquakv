@@ -172,16 +172,16 @@ def main():
             cache_factory = None
         else:
             quantizer = HiggsQuantizer(
-                codeword_dim=args.edenn_d, 
-                n_codewords=args.edenn_n, 
+                edenn_d=args.edenn_d, 
+                edenn_n=args.edenn_n, 
                 **common_quantizer_kwargs
             )
             if args.not_quantize_first_layer:
                 first_layer_quantizer = None
             else:
                 first_layer_quantizer = HiggsQuantizer(
-                    codeword_dim=2, 
-                    n_codewords=256, 
+                    edenn_d=2, 
+                    edenn_n=256, 
                     **common_quantizer_kwargs
                 )
 
