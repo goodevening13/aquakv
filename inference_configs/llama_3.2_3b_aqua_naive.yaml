@@ -1,0 +1,29 @@
+model_name: unsloth/Llama-3.2-3B
+
+batch_size: 1
+generation_length: null
+prefill_size: 4
+
+edenn_d: 4
+cache:
+ _target_: aquakv.cache_utils.InferenceCache # transformers.cache_utils.StaticCache
+ quantizer:
+  target: aquakv.quantizers.HiggsQuantizer
+  hadamard_groupsize: ???
+  edenn_d: ${edenn_d}
+  edenn_n: 256
+  channel_size: ???
+ 
+ edenn_d: ${edenn_d}
+ batch_size: ${batch_size}
+ predictors_path: "./my_little_predictor.pt"
+ max_cache_len: ${generation_length}
+ config: ???
+ device: ???
+ dtype: ???
+
+test: True
+
+hydra:
+  run:
+    dir: .
