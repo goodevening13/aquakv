@@ -7,19 +7,42 @@ from hydra.utils import instantiate
 from aquakv.cache_utils import InferenceCache
 
 def test(input_data, model, cache, max_len=None):
+    reference_hidden = torch.load("reference_hidden_states.pt")
+    print(type(reference_hidden))
+    print(len(reference_hidden))
     max_len = max_len or input_data.shape[1]
     lm_logits = torch.zeros(
                     (input_data.shape[0], max_len, model.get_output_embeddings().out_features), 
                     device=input_data.device, 
-                    dtype=input_data.dtype
+                    dtype=torch.float
     )
     for i in tqdm.tqdm(range(0, max_len)):
         out = model(input_data[:, i: i + 1], use_cache=True, past_key_values=cache, optimise_aquakv_inference=True)
         lm_logits[:, i: i + 1, ...] = out.logits
         # break
-    reference = torch.load("reference_logits.pt")
+    reference_logits = torch.load("reference_logits.pt")
+    # l = 0
+    # for layer in range(29):
+        # print(l, layer, reference_hidden[layer].shape, reference_hidden[layer].shape, torch.max(torch.abs(reference_hidden[layer][0, l, :] - reference_hidden[layer][0, l, :])))
+
     for l in range(max_len):
-        print(l, torch.max(torch.abs(reference[0, l, :] - lm_logits[0, l, :])), torch.argmax(reference[0, l, :]) == torch.argmax(lm_logits[0, l, :]))
+        # print(reference_logits[0, l, :10])
+        # print(lm_logits[0, l, :10])
+        print(l, torch.max(torch.abs(reference_logits[0, l, :] - lm_logits[0, l, :])), torch.argmax(reference_logits[0, l, :]) == torch.argmax(lm_logits[0, l, :]))
+    
+    to_break = False
+    for j in range(1, 28):
+        reference_idx = torch.load(f"reference_idx_{j}.pt")
+        reference_scales = torch.load(f"reference_scales_{j}.pt")
+        for l in range(max_len):
+            print(j, l, torch.any(cache.key_cache[j][0, l].cpu() != reference_idx[l]))
+            if torch.any(cache.key_cache[j][0, l].cpu() != reference_idx[l]):
+                to_break = True
+                print(j, l, " idx ", cache.key_cache[j][0, l], '\n', reference_idx[l])
+                print(j, l, " scales ", cache.key_scales[j][0, l], '\n', reference_scales[l].squeeze())
+        if to_break:
+            break
+
 
 @hydra.main(config_path='inference_configs', config_name=None)
 @torch.no_grad()
@@ -63,7 +86,7 @@ def main(experiment_config):
     
     if hasattr(experiment_config, "test") and experiment_config.test:
         input_data = torch.load("./real_input.pt")
-        test(input_data, model, cache, 32)
+        test(input_data, model, cache, 128)
     else:
         prefix_data = torch.randint(0, model_config.vocab_size, (experiment_config.batch_size, experiment_config.prefill_size), device=model.device)
         result = torch.empty((experiment_config.batch_size, generation_length), device=model.device, dtype=int)

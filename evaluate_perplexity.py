@@ -45,8 +45,13 @@ def evaluate_perplexity(
                 out = model(input_ids[:, i: i + step_size], use_cache=True, past_key_values=cache)
                 assert out.past_key_values is cache
                 lm_logits[:, i: i + step_size, ...] = out.logits
-                if i == 31:
+                if i == 127:
                     torch.save(lm_logits, "/home/aabocharnikov/src/aquakv/reference_logits.pt")
+                    # torch.save(out.hidden_states, "/home/aabocharnikov/src/aquakv/reference_hidden_states.pt")
+                    print(type(cache.suffix_cache.quantized_caches[0].key_states_cache[1]))
+                    for j in range(1, 28):
+                        torch.save(cache.suffix_cache.quantized_caches[0].key_states_cache[j].idx[:, 0, :], f"reference_idx_{j}.pt")
+                        torch.save(cache.suffix_cache.quantized_caches[0].key_states_cache[j].scales, f"reference_scales_{j}.pt")
                     return
             if sequence_index == 0:
                 print("saved")
@@ -170,7 +175,9 @@ def main():
         [value_predictors[i].to(device=device, dtype=str_to_dtype[args.torch_dtype]) for i in value_predictors]
 
     # loading model and datasets
+    print("loading data")
     testdata = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    print("loading model")
     config = transformers.AutoConfig.from_pretrained(args.model_name)
     model = transformers.AutoModelForCausalLM.from_pretrained(
         args.model_name, config=config, torch_dtype=args.torch_dtype, low_cpu_mem_usage=True, device_map='auto')
@@ -210,7 +217,7 @@ def main():
                 suffix_cache=PredictorHiggsCache(
                     config=model.config, 
                     min_buffer_size=args.recent_buffer_size,
-                    save_dequantized_values=True,
+                    save_dequantized_values=False, # True,
                     make_quantized_cache=partial(
                         SingleChunkQuantizedCacheWithPredictors,
                         quantizer=quantizer,

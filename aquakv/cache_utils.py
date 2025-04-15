@@ -8,7 +8,7 @@ from typing import Any, Tuple, Optional, Dict, List
 import torch
 import torch.nn as nn
 import transformers
-from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, rotate_half
 from transformers import PretrainedConfig
 
 from aquakv.quantizers import QuantizerBase, QuantizedTensor
@@ -77,17 +77,23 @@ class InferenceCache(transformers.cache_utils.Cache):
         
         assert self.channel_size % edenn_d == 0
         
-        unquantized_shape = (batch_size, self.max_cache_len, self.channel_size)
+        rope_shape = (batch_size, self.max_cache_len, self.head_dim)
+        dequantized_shape = (batch_size, self.num_key_value_heads, self.max_cache_len, self.head_dim)
         quantized_shape = (batch_size, self.max_cache_len, self.quantized_channel_size)
         scales_shape = (batch_size, self.max_cache_len)
         
-        self.make_unquantize_tensor = lambda : torch.empty(batch_size, quantization_chanks_size, self.channel_size, dtype=self.dtype, device=device)
- 
-        self.dequantized_key = torch.empty(unquantized_shape, dtype=self.dtype, device=device)
-        self.dequantized_value = torch.empty(unquantized_shape, dtype=self.dtype, device=device)
+        self.make_unquantize_tensor = lambda : torch.empty(batch_size, self.num_key_value_heads, quantization_chanks_size, self.head_dim, 
+                                                           dtype=self.dtype, 
+                                                           device=device)
         
-        self.key_cache.append(torch.empty(unquantized_shape, dtype=self.dtype, device=device))
-        self.value_cache.append(torch.empty(unquantized_shape, dtype=self.dtype, device=device))
+        self.sin: torch.Tensor = torch.empty(rope_shape, dtype=self.dtype, device=device)
+        self.cos: torch.Tensor = torch.empty(rope_shape, dtype=self.dtype, device=device)
+
+        self.dequantized_key = torch.empty(dequantized_shape, dtype=self.dtype, device=device)
+        self.dequantized_value = torch.empty(dequantized_shape, dtype=self.dtype, device=device)
+        
+        self.key_cache.append(torch.empty(dequantized_shape, dtype=self.dtype, device=device))
+        self.value_cache.append(torch.empty(dequantized_shape, dtype=self.dtype, device=device))
         # to have the index equal to the layer_idx
         self.unquantized_keys.append(torch.empty(0))
         self.unquantized_values.append(torch.empty(0))
@@ -105,8 +111,8 @@ class InferenceCache(transformers.cache_utils.Cache):
         assert os.path.isfile(predictors_path), (os.getcwd(), predictors_path)
         key_values_predictors = torch.load(predictors_path, weights_only=False)
         self.key_predictors, self.value_predictors = key_values_predictors["key_predictors"], key_values_predictors["value_predictors"]
-        [self.key_predictors[i].to(device) for i in self.key_predictors]
-        [self.value_predictors[i].to(device) for i in self.value_predictors]
+        [self.key_predictors[i].to(device=device, dtype=dtype) for i in self.key_predictors]
+        [self.value_predictors[i].to(device=device, dtype=dtype) for i in self.value_predictors]
 
         self.previous_key_reconstruction = self.previous_value_reconstruction = None
 
@@ -117,13 +123,45 @@ class InferenceCache(transformers.cache_utils.Cache):
         self._debug_total_tokens = defaultdict(int)
         self.is_prefil = defaultdict(lambda: True)
     
+    def two_d_to_four_d(self, x, n_tokens, apply_rope, layer_idx=None):
+        x = x.view(-1, n_tokens, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        if apply_rope:
+            assert layer_idx is not None
+            # if layer_idx == 2:
+                # print(x.shape, self.cos[:, :self.cached_tokens[layer_idx], :].shape, self.sin[:, :self.cached_tokens[layer_idx], :].shape)
+            x = apply_rotary_pos_emb_single(
+                x,
+                self.cos[:, :self.cached_tokens[layer_idx], :],
+                self.sin[:, :self.cached_tokens[layer_idx], :]
+            )
+            # if layer_idx == 2:
+                # print('x after', x.shape)
+        return x
+
+    def four_d_to_three_d(self, x, apply_rope, layer_idx=None, verbose=False):
+        bsz, l = x.shape[0], x.shape[2]
+        if apply_rope:
+            assert layer_idx is not None
+            # if layer_idx == 1 and verbose:
+                # print('rope shape', self.cos[:, self.cached_tokens[layer_idx]: self.cached_tokens[layer_idx] + l, :].shape, self.sin[:, self.cached_tokens[layer_idx]: self.cached_tokens[layer_idx] + l, :].shape, self.cos.dtype, self.sin.dtype)
+                # print("cos - \n", self.cos[:, self.cached_tokens[layer_idx]: self.cached_tokens[layer_idx] + l, :], "\nsin\n", self.sin[:, self.cached_tokens[layer_idx]: self.cached_tokens[layer_idx] + l, :])
+                # print("x - \n", x)
+            x = apply_rotary_pos_emb_single(
+                x, 
+                self.cos[:, self.cached_tokens[layer_idx]: self.cached_tokens[layer_idx] + l, :],
+                -self.sin[:, self.cached_tokens[layer_idx]: self.cached_tokens[layer_idx] + l, :]
+            )
+        x = x.transpose(1, 2).contiguous().view(bsz, l, self.channel_size)
+        return x
+
     def quantize(self, key_states, value_states, layer_idx):
         """
         quantizing_n_tokens is either quantization_chanks_size or tokens_to_quantize is case of prefil
         """
         assert layer_idx >= 1, layer_idx
+        assert len(key_states.shape) == 4, key_states.shape
         
-        quantizing_n_tokens = key_states.shape[1]
+        quantizing_n_tokens = key_states.shape[2]
         assert quantizing_n_tokens % self.quantization_chanks_size == 0, (key_states.shape)
         tokens_right_border = self.cached_tokens[layer_idx] + quantizing_n_tokens
 
@@ -131,11 +169,21 @@ class InferenceCache(transformers.cache_utils.Cache):
             assert quantizing_n_tokens == self.quantization_chanks_size, (self.is_prefil[layer_idx], quantizing_n_tokens)
          
         if layer_idx == 1:
-            self.previous_key_reconstruction   = self.key_cache[0][:, self.cached_tokens[1]: self.cached_tokens[1] + quantizing_n_tokens, :]
-            self.previous_value_reconstruction = self.value_cache[0][:, self.cached_tokens[1]: self.cached_tokens[1] + quantizing_n_tokens, :]
+            previous_key_reconstruction      = self.key_cache[0][:, :, self.cached_tokens[1]: self.cached_tokens[1] + quantizing_n_tokens, :]
+            self.previous_key_reconstruction = self.four_d_to_three_d(previous_key_reconstruction, True, layer_idx, verbose=True)
+
+            previous_value_reconstruction      = self.value_cache[0][:, :, self.cached_tokens[1]: self.cached_tokens[1] + quantizing_n_tokens, :]
+            self.previous_value_reconstruction = self.four_d_to_three_d(previous_value_reconstruction, False)
         
+        assert len(self.previous_key_reconstruction.shape) == 3, (layer_idx, self.previous_key_reconstruction.shape)
         key_predicted_state = self.key_predictors[layer_idx](self.previous_key_reconstruction)
-        quantized_key_residual: QuantizedTensor = self.quantizer.quantize((key_states - key_predicted_state).view(-1, self.channel_size))
+        if layer_idx == 2:
+            print("shapes", self.four_d_to_three_d(key_states, True, layer_idx).shape, key_predicted_state.shape) # self.previous_key_reconstruction.shape, previous_key_reconstruction.shape
+            print("with rope", key_states.shape, key_states.squeeze())
+            # print(previous_key_reconstruction.dtype, self.previous_key_reconstruction.dtype)
+            print("key states - \n", self.four_d_to_three_d(key_states, True, layer_idx)[0, -1], "\nkey_predicted_states\n", key_predicted_state[0, -1])
+            # print("prev_key_reconstraction\n", self.previous_key_reconstruction, "\nbefore rope\n", previous_key_reconstruction)
+        quantized_key_residual: QuantizedTensor = self.quantizer.quantize((self.four_d_to_three_d(key_states, True, layer_idx) - key_predicted_state).view(-1, self.channel_size))
         
         self.key_cache[layer_idx][:, self.cached_tokens[layer_idx]: tokens_right_border, :] = quantized_key_residual.idx.view(-1, quantizing_n_tokens, self.quantized_channel_size)
         self.key_scales[layer_idx][:, self.cached_tokens[layer_idx]: tokens_right_border] = quantized_key_residual.scales.view(-1, quantizing_n_tokens)
@@ -143,7 +191,7 @@ class InferenceCache(transformers.cache_utils.Cache):
 
         value_predictor_inputs = torch.cat([key_reconstracted_state, self.previous_value_reconstruction], dim=-1)
         value_predicted_state = self.value_predictors[layer_idx](value_predictor_inputs)
-        quantized_value_residual: QuantizedTensor = self.quantizer.quantize((value_states - value_predicted_state).view(-1, self.channel_size))
+        quantized_value_residual: QuantizedTensor = self.quantizer.quantize((self.four_d_to_three_d(value_states, False) - value_predicted_state).view(-1, self.channel_size))
         self.value_cache[layer_idx][:, self.cached_tokens[layer_idx]: tokens_right_border, :] = quantized_value_residual.idx.view(-1, quantizing_n_tokens, self.quantized_channel_size)
         self.value_scales[layer_idx][:, self.cached_tokens[layer_idx]: tokens_right_border] = quantized_value_residual.scales.view(-1, quantizing_n_tokens)
         value_reconstracted_state = value_predicted_state + self.quantizer.dequantize(quantized_value_residual).view(-1, quantizing_n_tokens, self.channel_size).to(self.dtype)
@@ -156,47 +204,42 @@ class InferenceCache(transformers.cache_utils.Cache):
     def dequantize(self, layer_idx):
         n_cached_tokens = self.cached_tokens[layer_idx]
         unquantized_tokens = self.unquantized_tokens[layer_idx]
-
         if n_cached_tokens > 0:
-            self.dequantized_key[:, :n_cached_tokens, :] = self.quantizer.dequantize(
+            dequantized_residual_keys = self.quantizer.dequantize(
                 QuantizedTensor(
                     self.key_cache[layer_idx][:, :n_cached_tokens, :].contiguous().view(-1, self.quantized_channel_size),
                     self.key_scales[layer_idx][:, :n_cached_tokens].contiguous().view(-1)
                 )
-            ).view(-1, n_cached_tokens, self.channel_size).to(self.dtype)
-            self.dequantized_value[:, :n_cached_tokens, :] = self.quantizer.dequantize(
+            )
+            key_predicted_state = self.key_predictors[layer_idx](self.previous_key_reconstruction)
+            key_reconstracted_state = key_predicted_state + dequantized_residual_keys
+            
+            self.dequantized_key[:, :, :n_cached_tokens, :] = self.two_d_to_four_d(dequantized_keys, n_cached_tokens, True, layer_idx).to(self.dtype)
+            dequantized_value = self.quantizer.dequantize(
                 QuantizedTensor(
                     self.value_cache[layer_idx][:, :n_cached_tokens, :].contiguous().view(-1, self.quantized_channel_size),
                     self.value_scales[layer_idx][:, :n_cached_tokens].contiguous().view(-1)
                 )
-            ).view(-1, n_cached_tokens, self.channel_size).to(self.dtype)
-
-        self.dequantized_key[:, n_cached_tokens: n_cached_tokens + unquantized_tokens, :] = self.unquantized_keys[layer_idx][:, :unquantized_tokens, :]
-        self.dequantized_value[:, n_cached_tokens: n_cached_tokens + unquantized_tokens, :] = self.unquantized_values[layer_idx][:, :unquantized_tokens, :]
-        # reference_key = torch.load(f"reference_keys_{layer_idx}.pt")
-        prediction_key = self.dequantized_key[:, :n_cached_tokens + unquantized_tokens, :].view(1, n_cached_tokens + unquantized_tokens, 8, 128).transpose(1, 2)
-        # print(layer_idx, reference_key.shape, prediction_key.shape)
-        # print(layer_idx, torch.max(torch.abs(reference_key[:, :, 0, :] - prediction_key[:, :, 0, :])))
-        return self.dequantized_key[:, :n_cached_tokens + unquantized_tokens, :], self.dequantized_value[:, :n_cached_tokens + unquantized_tokens, :]
+            )
+            self.dequantized_value[:, :, :n_cached_tokens, :] = self.two_d_to_four_d(dequantized_value, n_cached_tokens, False).to(self.dtype)
+        self.dequantized_key[:, :, n_cached_tokens: n_cached_tokens + unquantized_tokens, :] = self.unquantized_keys[layer_idx][:, :, :unquantized_tokens, :]
+        self.dequantized_value[:, :, n_cached_tokens: n_cached_tokens + unquantized_tokens, :] = self.unquantized_values[layer_idx][:, :, :unquantized_tokens, :]
+        return self.dequantized_key[:, :, :n_cached_tokens + unquantized_tokens, :], self.dequantized_value[:, :, :n_cached_tokens + unquantized_tokens, :]
 
     def update(self, key_states, value_states, layer_idx, cache_kwargs = None):
-        n_new_tokens = key_states.shape[1]
+        assert len(key_states.shape) == 4 == len(value_states.shape), (key_states.shape, value_states.shape)
+        n_new_tokens = key_states.shape[2]
         self._debug_total_tokens[layer_idx] += n_new_tokens
-        # print(layer_idx, " input key ", key_states[0, 0, :10])
-        
-        cos, sin = cache_kwargs['cos'], cache_kwargs['sin']
-        bsz, kv_len = key_states.shape[:2]
-        key_states = key_states.view(bsz, kv_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        key_states = apply_rotary_to_keys(key_states, cos=cos, sin=sin)
-        key_states = apply_rotary_to_keys(key_states, cos=cos, sin=-sin)
-        key_states = combine_heads(key_states)
 
         assert self.next_layer == layer_idx, (self.next_layer, layer_idx)
 
         if layer_idx == 0:
             tokens_right_border = self.unquantized_tokens[0] + n_new_tokens
-            self.key_cache[0][:, self.unquantized_tokens[0]: tokens_right_border, :] = key_states
-            self.value_cache[0][:, self.unquantized_tokens[0]: tokens_right_border, :] = value_states
+            self.key_cache[0][:, :, self.unquantized_tokens[0]: tokens_right_border, :] = key_states
+            self.value_cache[0][:, :, self.unquantized_tokens[0]: tokens_right_border, :] = value_states
+
+            self.sin[:, self.unquantized_tokens[0]: tokens_right_border, :] = cache_kwargs['sin']
+            self.cos[:, self.unquantized_tokens[0]: tokens_right_border, :] = cache_kwargs['cos']
 
             self.previous_key_reconstruction = key_states
             self.previous_value_reconstruction = value_states
@@ -205,19 +248,18 @@ class InferenceCache(transformers.cache_utils.Cache):
 
             self.next_layer += 1
             assert self._debug_total_tokens[layer_idx] == self.get_seq_length()
-            print("INSIDE INFO", self.unquantized_tokens[0], self.key_cache[0][:, :self.unquantized_tokens[0], :].view(bsz, self.unquantized_tokens[0], self.num_key_value_heads, self.head_dim).transpose(1, 2)[0, 0, :, :10])
-            return self.key_cache[0][:, :self.unquantized_tokens[0], :], self.value_cache[0][:, :self.unquantized_tokens[0], :]
+            return self.key_cache[0][:, :, :self.unquantized_tokens[0], :], self.value_cache[0][:, :, :self.unquantized_tokens[0], :]
         else:
             if self.is_prefil[layer_idx]:
                 n_chanks = n_new_tokens // self.quantization_chanks_size
                 tokens_to_quantize = n_chanks * self.quantization_chanks_size 
                 if n_chanks > 0:
-                    self.quantize(key_states[:, :tokens_to_quantize, :], value_states[:, :tokens_to_quantize, :], layer_idx)
+                    self.quantize(key_states[:, :, :tokens_to_quantize, :], value_states[:, :, :tokens_to_quantize, :], layer_idx)
                 new_unquantized_tokens = n_new_tokens - tokens_to_quantize
                 assert self.unquantized_tokens[layer_idx] == 0, (layer_idx, self.unquantized_tokens[layer_idx])
                 if new_unquantized_tokens > 0:
-                    self.unquantized_keys[layer_idx][:, :new_unquantized_tokens, :] = key_states[:, tokens_to_quantize:, :]
-                    self.unquantized_values[layer_idx][:, :new_unquantized_tokens, :] = value_states[:, tokens_to_quantize:, :]
+                    self.unquantized_keys[layer_idx][:, :, :new_unquantized_tokens, :] = key_states[:, :, tokens_to_quantize:, :]
+                    self.unquantized_values[layer_idx][:, :, :new_unquantized_tokens, :] = value_states[:, :, tokens_to_quantize:, :]
                     self.unquantized_tokens[layer_idx] = new_unquantized_tokens
                 
                 self.is_prefil[layer_idx] = False
@@ -225,9 +267,9 @@ class InferenceCache(transformers.cache_utils.Cache):
             else:
                 assert n_new_tokens == 1, (key_states.shape)
                 assert self.unquantized_tokens[layer_idx] < self.quantization_chanks_size, (layer_idx, self.unquantized_tokens[layer_idx])
-                self.unquantized_keys[layer_idx][:, self.unquantized_tokens[layer_idx]: self.unquantized_tokens[layer_idx] + 1, :] = key_states
-                self.unquantized_values[layer_idx][:, self.unquantized_tokens[layer_idx]: self.unquantized_tokens[layer_idx] + 1, :] = value_states
-                
+                self.unquantized_keys[layer_idx][:, :, self.unquantized_tokens[layer_idx]: self.unquantized_tokens[layer_idx] + 1, :] = key_states
+                self.unquantized_values[layer_idx][:, :, self.unquantized_tokens[layer_idx]: self.unquantized_tokens[layer_idx] + 1, :] = value_states
+
                 self.unquantized_tokens[layer_idx] += 1
                 if self.unquantized_tokens[layer_idx] == self.quantization_chanks_size:
                     self.quantize(self.unquantized_keys[layer_idx], self.unquantized_values[layer_idx], layer_idx)
@@ -240,6 +282,15 @@ class InferenceCache(transformers.cache_utils.Cache):
             assert self._debug_total_tokens[layer_idx] == self.get_seq_length()
             tmp_key, tmp_value = self.dequantize(layer_idx)
             # print(layer_idx, " output key ", tmp_key.shape, tmp_key[0, :, :10])
+            reference_key = torch.load(f"reference_update_output_key_{layer_idx}.pt")
+            reference_value = torch.load(f"reference_update_output_value_{layer_idx}.pt")
+            if not torch.allclose(tmp_key, reference_key[:, :, :tmp_key.shape[2], :]):
+                print("KEY DIFF", tmp_key.shape[2], layer_idx)
+            if not torch.allclose(tmp_value, reference_value[:, :, :tmp_key.shape[2], :]):
+                print("VALUE DIFF", tmp_value.shape[2], layer_idx)
+            
+            # print(layer_idx, tmp_key.shape, reference_key.shape)
+            # print(layer_idx, tmp_value.shape, reference_value.shape)
             return tmp_key, tmp_value
             
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
@@ -440,6 +491,13 @@ class SingleChunkQuantizedCacheWithPredictors(transformers.cache_utils.Cache):
             if self.head_dim is None:
                 self.head_dim = key_states.shape[-1]
             # undo rotation using cos(-alpha) = cos(alpha) and sin(-alpha) = -sin(alpha)
+            key_with_rope = key_states.clone()
+            # if layer_idx == 0:
+                # print("shapes - ", self.cos.shape, self.sin.shape, self.cos.dtype, self.sin.dtype)
+                # print("cos - \n", self.cos, '\nsin\n', self.sin)
+                # print("x - \n", key_states)
+            if layer_idx == 2:
+                save_key = key_states.clone()
             key_states = apply_rotary_to_keys(key_states, cos=self.cos.to(device), sin=-self.sin.to(device))
 
             # v-- from [batch, num_heads, seq_length, head_dim] to [batch, seq_length, hidden_size]
@@ -462,8 +520,14 @@ class SingleChunkQuantizedCacheWithPredictors(transformers.cache_utils.Cache):
                 else:
                     reconstructed_key_states = self.key_states_cache[0] = key_states
                     reconstructed_value_states = self.value_states_cache[0] = value_states
+                self.save_layer_0 = key_with_rope.clone()
             else:
                 predicted_key_states = self.predict_next_key_states().to(device)
+                if layer_idx == 2:
+                    print("shapes", key_states.shape, predicted_key_states.shape) # self.previous_key_reconstruction.shape, self.save_layer_0.shape
+                    # print(self.save_layer_0.dtype, self.previous_key_reconstruction.dtype)
+                    print("with rope", save_key.squeeze())
+                    print("key states - \n", key_states[0, -1], "\npredicted_key_states\n", predicted_key_states[0, -1]) #  "\nprev_key_reconstraction\n", self.previous_key_reconstruction, '\nkey before rope\n', self.save_layer_0.squeeze()
                 self.key_states_cache[layer_idx] = self.quantizer.quantize(
                     (key_states - predicted_key_states).flatten(0, -2))
                 reconstructed_key_states = predicted_key_states + self.quantizer.dequantize(
@@ -502,10 +566,19 @@ class SingleChunkQuantizedCacheWithPredictors(transformers.cache_utils.Cache):
         self.next_layer_idx = layer_idx + 1
         self.previous_key_reconstruction = reconstructed_key_states
         self.previous_value_reconstruction = reconstructed_value_states
+        torch.save(result_key, f"reference_update_output_key_{layer_idx}.pt")
+        torch.save(result_value, f"reference_update_output_value_{layer_idx}.pt")
         return result_key, result_value
 
     def __repr__(self):
         return f"{self.__class__.__name__}({self.get_seq_length()})"
+
+
+def apply_rotary_pos_emb_single(x, cos, sin, unsqueeze_dim=1):
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    x_embed = (x * cos) + (rotate_half(x) * sin)
+    return x_embed
 
 
 def apply_rotary_to_keys(key_states: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
