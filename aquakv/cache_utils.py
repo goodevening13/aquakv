@@ -41,11 +41,12 @@ class InferenceCache(transformers.cache_utils.Cache):
             quantizer: QuantizerBase,
             edenn_d: int,
             batch_size: int,
+            prefix_size: int,
             predictors_path: str,
             max_cache_len: int = None,
             device: torch.device = None,
             dtype: torch.dtype = torch.float32,
-            quantization_chanks_size: int = 128
+            quantization_chunks_size: int = 128
         ):
         super().__init__()
         self.max_cache_len = config.max_position_embeddings if max_cache_len is None else max_cache_len
@@ -65,26 +66,31 @@ class InferenceCache(transformers.cache_utils.Cache):
         self.channel_size = self.num_key_value_heads * self.head_dim
         self.quantized_channel_size = self.channel_size // edenn_d
         
-        self.quantization_chanks_size = quantization_chanks_size
+        self.quantization_chunks_size = quantization_chunks_size
+        self.prefix_size = prefix_size
         
         self.key_cache: List[torch.Tensor] = []
         self.value_cache: List[torch.Tensor] = []
         self.key_scales: Dict[int, torch.Tensor] = dict()
         self.value_scales: Dict[int, torch.Tensor] = dict()
         
-        self.unquantized_keys: List[torch.Tensor] = [] # 28 * < 128
-        self.unquantized_values: List[torch.Tensor] = []
-        
+        self.unquantized_keys: Dict[int, torch.Tensor] = dict()
+        self.unquantized_values: Dict[int, torch.Tensor] = dict()
+
+        self.attention_sync_key: Dict[int, torch.Tensor] = dict()
+        self.attention_sync_value: Dict[int, torch.Tensor] = dict()
+
         assert self.channel_size % edenn_d == 0
         
-        rope_shape = (batch_size, self.max_cache_len, self.head_dim)
-        dequantization_shape_3d = (batch_size, self.max_cache_len, self.channel_size)
+        quantized_length = self.max_cache_len - self.prefix_size - self.quantization_chunks_size
+        rope_shape = (batch_size, quantized_length, self.head_dim)
+        dequantization_shape_3d = (batch_size, quantized_length, self.channel_size)
         dequantized_shape = (batch_size, self.num_key_value_heads, self.max_cache_len, self.head_dim)
-        quantization_shape_3d = (batch_size, self.quantization_chanks_size, self.channel_size)
-        quantized_shape = (batch_size, self.max_cache_len, self.quantized_channel_size)
-        scales_shape = (batch_size, self.max_cache_len)
+        quantized_shape = (batch_size, quantized_length, self.quantized_channel_size)
+        scales_shape = (batch_size, quantized_length)
+        attention_syncs_shape = (batch_size, self.num_key_value_heads, self.prefix_size, self.head_dim)
         
-        self.make_unquantize_tensor = lambda : torch.empty(batch_size, self.num_key_value_heads, quantization_chanks_size, self.head_dim, 
+        self.make_unquantize_tensor = lambda : torch.empty(batch_size, self.num_key_value_heads, quantization_chunks_size, self.head_dim, 
                                                            dtype=self.dtype, 
                                                            device=device)
         
@@ -94,24 +100,22 @@ class InferenceCache(transformers.cache_utils.Cache):
         self.dequantized_key = torch.empty(dequantized_shape, dtype=self.dtype, device=device)
         self.dequantized_value = torch.empty(dequantized_shape, dtype=self.dtype, device=device)
 
-        self.previous_key_reconstruction_quantization = torch.empty(quantization_shape_3d, dtype=self.dtype, device=device)
-        self.previous_value_reconstruction_quantization = torch.empty(quantization_shape_3d, dtype=self.dtype, device=device)
         self.previous_key_reconstruction_dequantization = torch.empty(dequantization_shape_3d, dtype=self.dtype, device=device)
         self.previous_value_reconstruction_dequantization = torch.empty(dequantization_shape_3d, dtype=self.dtype, device=device)
 
         self.key_cache.append(torch.empty(dequantized_shape, dtype=self.dtype, device=device))
         self.value_cache.append(torch.empty(dequantized_shape, dtype=self.dtype, device=device))
         # to have the index equal to the layer_idx
-        self.unquantized_keys.append(torch.empty(0))
-        self.unquantized_values.append(torch.empty(0))
         for idx in range(1, config.num_hidden_layers):
             self.key_cache.append(torch.empty(quantized_shape, dtype=torch.uint8, device=device))
             self.key_scales[idx] = torch.empty(scales_shape, dtype=torch.float32, device=device)
-            self.unquantized_keys.append(self.make_unquantize_tensor())
+            self.unquantized_keys[idx] = self.make_unquantize_tensor()
+            self.attention_sync_key[idx] = torch.empty(attention_syncs_shape, dtype=self.dtype, device=device)
 
             self.value_cache.append(torch.empty(quantized_shape, dtype=torch.uint8, device=device))
             self.value_scales[idx] = torch.empty(scales_shape, dtype=torch.float32, device=device)
-            self.unquantized_values.append(self.make_unquantize_tensor())
+            self.unquantized_values[idx] = self.make_unquantize_tensor()
+            self.attention_sync_value[idx] = torch.empty(attention_syncs_shape, dtype=self.dtype, device=device)
 
         self.quantizer = quantizer
 
@@ -122,6 +126,7 @@ class InferenceCache(transformers.cache_utils.Cache):
         [self.value_predictors[i].to(device=device, dtype=dtype) for i in self.value_predictors]
 
         self.unquantized_tokens = defaultdict(int)
+        self.attention_sync_tokens = defaultdict(int)
         self.cached_tokens = defaultdict(int)
         self.next_layer = 0
         self.n_layers = config.num_hidden_layers
@@ -135,8 +140,8 @@ class InferenceCache(transformers.cache_utils.Cache):
             assert layer_idx is not None
             x = apply_rotary_pos_emb_single(
                 x,
-                self.cos[:, :self.cached_tokens[layer_idx], :],
-                self.sin[:, :self.cached_tokens[layer_idx], :]
+                self.cos[:, self.prefix_size: self.prefix_size + self.cached_tokens[layer_idx], :],
+                self.sin[:, self.prefix_size: self.prefix_size + self.cached_tokens[layer_idx], :]
             )
         return x
 
@@ -145,9 +150,9 @@ class InferenceCache(transformers.cache_utils.Cache):
         if apply_rope:
             assert layer_idx is not None
             if quantization:
-                tokens_sline = slice(self.cached_tokens[layer_idx], self.cached_tokens[layer_idx] + l)
+                tokens_sline = slice(self.prefix_size + self.cached_tokens[layer_idx], self.prefix_size + self.cached_tokens[layer_idx] + l)
             else:
-                tokens_sline = slice(0, self.cached_tokens[layer_idx])
+                tokens_sline = slice(self.prefix_size, self.prefix_size + self.cached_tokens[layer_idx])
             x = apply_rotary_pos_emb_single(
                 x, 
                 self.cos[:, tokens_sline, :],
@@ -158,35 +163,38 @@ class InferenceCache(transformers.cache_utils.Cache):
 
     def quantize(self, key_states, value_states, layer_idx):
         """
-        quantizing_n_tokens is either quantization_chanks_size or tokens_to_quantize is case of prefil
+        quantizing_n_tokens is either quantization_chunks_size or tokens_to_quantize is case of prefil
         """
         assert layer_idx >= 1, layer_idx
         assert len(key_states.shape) == 4, key_states.shape
-        
+        assert self.attention_sync_tokens[layer_idx] == self.prefix_size
         quantizing_n_tokens = key_states.shape[2]
-        assert quantizing_n_tokens % self.quantization_chanks_size == 0, (key_states.shape)
-        new_range = slice(self.cached_tokens[layer_idx], self.cached_tokens[layer_idx] + quantizing_n_tokens)
-        
+        assert quantizing_n_tokens % self.quantization_chunks_size == 0, (key_states.shape)
+        unquantized_slice = slice(self.prefix_size + self.cached_tokens[layer_idx], self.prefix_size + self.cached_tokens[layer_idx] + quantizing_n_tokens)
+        quantized_slice = slice(self.cached_tokens[layer_idx], self.cached_tokens[layer_idx] + quantizing_n_tokens)
+
         if not self.is_prefil[layer_idx]:
-            assert quantizing_n_tokens == self.quantization_chanks_size, (self.is_prefil[layer_idx], quantizing_n_tokens)
+            assert quantizing_n_tokens == self.quantization_chunks_size, (self.is_prefil[layer_idx], quantizing_n_tokens)
          
         if layer_idx == 1:
-            previous_key_reconstruction = self.key_cache[0][:, :, new_range, :]
+            previous_key_reconstruction = self.key_cache[0][:, :, unquantized_slice, :]
             self.previous_key_reconstruction_quantization = self.four_d_to_three_d(previous_key_reconstruction, quantization=True, apply_rope=True, layer_idx=layer_idx)
-            previous_value_reconstruction = self.value_cache[0][:, :, new_range, :]
+            previous_value_reconstruction = self.value_cache[0][:, :, unquantized_slice, :]
             self.previous_value_reconstruction_quantization = self.four_d_to_three_d(previous_value_reconstruction, quantization=True, apply_rope=False)
 
         key_predicted_state = self.key_predictors[layer_idx](self.previous_key_reconstruction_quantization)
+        # print(self.key_cache[0].shape, self.key_cache[0][:, :, unquantized_slice, :].shape)
+        # print(unquantized_slice, quantizing_n_tokens, previous_key_reconstruction.shape, key_predicted_state.shape, key_states.shape, self.four_d_to_three_d(key_states, quantization=True, apply_rope=True, layer_idx=layer_idx).shape)
         quantized_key_residual: QuantizedTensor = self.quantizer.quantize((self.four_d_to_three_d(key_states, quantization=True, apply_rope=True, layer_idx=layer_idx) - key_predicted_state).view(-1, self.channel_size))
-        self.key_cache[layer_idx][:, new_range, :] = quantized_key_residual.idx.view(-1, quantizing_n_tokens, self.quantized_channel_size)
-        self.key_scales[layer_idx][:, new_range] = quantized_key_residual.scales.view(-1, quantizing_n_tokens)
+        self.key_cache[layer_idx][:, quantized_slice, :] = quantized_key_residual.idx.view(-1, quantizing_n_tokens, self.quantized_channel_size)
+        self.key_scales[layer_idx][:, quantized_slice] = quantized_key_residual.scales.view(-1, quantizing_n_tokens)
         key_reconstracted_state = key_predicted_state + self.quantizer.dequantize(quantized_key_residual).view(-1, quantizing_n_tokens, self.channel_size).to(self.dtype)
 
         value_predictor_inputs = torch.cat([key_reconstracted_state, self.previous_value_reconstruction_quantization], dim=-1)
         value_predicted_state = self.value_predictors[layer_idx](value_predictor_inputs)
         quantized_value_residual: QuantizedTensor = self.quantizer.quantize((self.four_d_to_three_d(value_states, quantization=True, apply_rope=False) - value_predicted_state).view(-1, self.channel_size))
-        self.value_cache[layer_idx][:, new_range, :] = quantized_value_residual.idx.view(-1, quantizing_n_tokens, self.quantized_channel_size)
-        self.value_scales[layer_idx][:, new_range] = quantized_value_residual.scales.view(-1, quantizing_n_tokens)
+        self.value_cache[layer_idx][:, quantized_slice, :] = quantized_value_residual.idx.view(-1, quantizing_n_tokens, self.quantized_channel_size)
+        self.value_scales[layer_idx][:, quantized_slice] = quantized_value_residual.scales.view(-1, quantizing_n_tokens)
         value_reconstracted_state = value_predicted_state + self.quantizer.dequantize(quantized_value_residual).view(-1, quantizing_n_tokens, self.channel_size).to(self.dtype)
 
         self.previous_key_reconstruction_quantization = key_reconstracted_state
@@ -195,14 +203,21 @@ class InferenceCache(transformers.cache_utils.Cache):
         self.cached_tokens[layer_idx] += quantizing_n_tokens
 
     def dequantize(self, layer_idx):
+        n_attention_sync_tokens = self.attention_sync_tokens[layer_idx]
         n_cached_tokens = self.cached_tokens[layer_idx]
         unquantized_tokens = self.unquantized_tokens[layer_idx]
+        
+        self.dequantized_key[:, :, :n_attention_sync_tokens, :] = self.attention_sync_key[layer_idx][:, :, :n_attention_sync_tokens, :]
+        self.dequantized_value[:, :, :n_attention_sync_tokens, :] = self.attention_sync_value[layer_idx][:, :, :n_attention_sync_tokens, :]
+        
         if n_cached_tokens > 0:
+            assert n_attention_sync_tokens == self.prefix_size, (n_attention_sync_tokens, self.prefix_size, n_cached_tokens, layer_idx)
+            cached_slice = slice(n_attention_sync_tokens, n_attention_sync_tokens + n_cached_tokens)
             if layer_idx == 1:
-                previous_key_reconstruction = self.key_cache[0][:, :, :n_cached_tokens, :]
+                previous_key_reconstruction = self.key_cache[0][:, :, cached_slice, :]
                 self.previous_key_reconstruction_dequantization[:, :n_cached_tokens, :] =  self.four_d_to_three_d(previous_key_reconstruction, quantization=False, apply_rope=True, layer_idx=layer_idx)
 
-                previous_value_reconstruction = self.value_cache[0][:, :, :n_cached_tokens, :]
+                previous_value_reconstruction = self.value_cache[0][:, :, cached_slice, :]
                 self.previous_value_reconstruction_dequantization[:, :n_cached_tokens, :] = self.four_d_to_three_d(previous_value_reconstruction, quantization=False, apply_rope=False)
 
             dequantized_residual_keys = self.quantizer.dequantize(
@@ -214,7 +229,7 @@ class InferenceCache(transformers.cache_utils.Cache):
             key_predicted_state = self.key_predictors[layer_idx](self.previous_key_reconstruction_dequantization[:, :n_cached_tokens, :])
             self.previous_key_reconstruction_dequantization[:, :n_cached_tokens, :] = key_predicted_state + dequantized_residual_keys
 
-            self.dequantized_key[:, :, :n_cached_tokens, :] = self.three_d_to_four_d(self.previous_key_reconstruction_dequantization[:, :n_cached_tokens, :], True, layer_idx).to(self.dtype)
+            self.dequantized_key[:, :, cached_slice, :] = self.three_d_to_four_d(self.previous_key_reconstruction_dequantization[:, :n_cached_tokens, :], True, layer_idx).to(self.dtype)
 
             dequantized_value = self.quantizer.dequantize(
                 QuantizedTensor(
@@ -226,11 +241,17 @@ class InferenceCache(transformers.cache_utils.Cache):
             value_predicted_state = self.value_predictors[layer_idx](value_predictor_inputs)
             self.previous_value_reconstruction_dequantization[:, :n_cached_tokens, :] = value_predicted_state + dequantized_value
 
-            self.dequantized_value[:, :, :n_cached_tokens, :] = self.three_d_to_four_d(self.previous_value_reconstruction_dequantization[:, :n_cached_tokens, :], False).to(self.dtype)
-        assert 1 <= unquantized_tokens <= 128, (layer_idx, unquantized_tokens)
-        self.dequantized_key[:, :, n_cached_tokens: n_cached_tokens + unquantized_tokens, :] = self.unquantized_keys[layer_idx][:, :, :unquantized_tokens, :]
-        self.dequantized_value[:, :, n_cached_tokens: n_cached_tokens + unquantized_tokens, :] = self.unquantized_values[layer_idx][:, :, :unquantized_tokens, :]
-        return self.dequantized_key[:, :, :n_cached_tokens + unquantized_tokens, :], self.dequantized_value[:, :, :n_cached_tokens + unquantized_tokens, :]
+            self.dequantized_value[:, :, cached_slice, :] = self.three_d_to_four_d(self.previous_value_reconstruction_dequantization[:, :n_cached_tokens, :], False).to(self.dtype)
+        
+        if self.unquantized_tokens[layer_idx] > 0:
+            assert self.attention_sync_tokens[layer_idx] == self.prefix_size, (layer_idx, self.attention_sync_tokens[layer_idx], self.prefix_size)
+            unquantized_slice = slice(self.prefix_size + n_cached_tokens, self.prefix_size + n_cached_tokens + unquantized_tokens)
+
+            self.dequantized_key[:, :, unquantized_slice, :] = self.unquantized_keys[layer_idx][:, :, :unquantized_tokens, :]
+            self.dequantized_value[:, :, unquantized_slice, :] = self.unquantized_values[layer_idx][:, :, :unquantized_tokens, :]
+        
+        return self.dequantized_key[:, :, :n_attention_sync_tokens + n_cached_tokens + unquantized_tokens, :], \
+               self.dequantized_value[:, :, :n_attention_sync_tokens + n_cached_tokens + unquantized_tokens, :]
 
     def update(self, key_states, value_states, layer_idx, cache_kwargs = None):
         assert len(key_states.shape) == 4 == len(value_states.shape), (key_states.shape, value_states.shape)
@@ -252,61 +273,84 @@ class InferenceCache(transformers.cache_utils.Cache):
             self.next_layer += 1
             assert self._debug_total_tokens[layer_idx] == self.get_seq_length()
 
-            if self.unquantized_tokens[0] > self.quantization_chanks_size:
-                cached_tokens = (self.unquantized_tokens[0] - 1) // self.quantization_chanks_size * self.quantization_chanks_size
-                for_debug_only = self.key_cache[0][:, :, :cached_tokens, :]
+            if self.unquantized_tokens[0] > self.prefix_size + self.quantization_chunks_size:
+                cached_tokens = (self.unquantized_tokens[0] - self.prefix_size - 1) // self.quantization_chunks_size * self.quantization_chunks_size
+                debug_slice = slice(self.prefix_size, self.prefix_size + cached_tokens)
+                for_debug_only = self.key_cache[0][:, :, debug_slice, :]
                 for_debug_only = apply_rotary_pos_emb_single(
                     for_debug_only, 
-                    self.cos[:, :cached_tokens, :],
-                    -self.sin[:, :cached_tokens, :]
+                    self.cos[:, debug_slice, :],
+                    -self.sin[:, debug_slice, :]
                 )
                 for_debug_only = apply_rotary_pos_emb_single(
                     for_debug_only, 
-                    self.cos[:, :cached_tokens, :],
-                    self.sin[:, :cached_tokens, :]
+                    self.cos[:, debug_slice, :],
+                    self.sin[:, debug_slice, :]
                 )
-                for_debug_only = torch.cat([for_debug_only, self.key_cache[0][:, :, cached_tokens:self.unquantized_tokens[0], :]], dim=-2)
+                for_debug_only = torch.cat(
+                    [self.key_cache[0][:, :, :self.prefix_size, :],
+                     for_debug_only,
+                     self.key_cache[0][:, :, self.prefix_size + cached_tokens: self.unquantized_tokens[0], :]], 
+                    dim=-2
+                )
                 return for_debug_only, self.value_cache[0][:, :, :self.unquantized_tokens[0], :]
             else:
                 return self.key_cache[0][:, :, :self.unquantized_tokens[0], :], self.value_cache[0][:, :, :self.unquantized_tokens[0], :]
         else:
             if self.is_prefil[layer_idx]:
-                n_chanks = (n_new_tokens - 1) // self.quantization_chanks_size
-                tokens_to_quantize = n_chanks * self.quantization_chanks_size 
-                if n_chanks > 0:
-                    self.quantize(key_states[:, :, :tokens_to_quantize, :], value_states[:, :, :tokens_to_quantize, :], layer_idx)
-                new_unquantized_tokens = n_new_tokens - tokens_to_quantize
-                assert self.unquantized_tokens[layer_idx] == 0, (layer_idx, self.unquantized_tokens[layer_idx])
-                assert 0 < new_unquantized_tokens <= 128, (n_new_tokens, n_chanks, new_unquantized_tokens)
-                self.unquantized_keys[layer_idx][:, :, :new_unquantized_tokens, :] = key_states[:, :, tokens_to_quantize:, :]
-                self.unquantized_values[layer_idx][:, :, :new_unquantized_tokens, :] = value_states[:, :, tokens_to_quantize:, :]
-                self.unquantized_tokens[layer_idx] = new_unquantized_tokens
+                n_chunks = max(0, n_new_tokens - self.prefix_size - 1) // self.quantization_chunks_size
+                tokens_to_quantize = n_chunks * self.quantization_chunks_size 
+                
+                prefil_tokens = min(n_new_tokens, self.prefix_size)
+                self.attention_sync_key[layer_idx][:, :, :prefil_tokens, :] = key_states[:, :, :prefil_tokens, :]
+                self.attention_sync_value[layer_idx][:, :, :prefil_tokens, :] = value_states[:, :, :prefil_tokens, :]
+                self.attention_sync_tokens[layer_idx] = prefil_tokens
+
+                if n_chunks > 0:
+                    assert self.attention_sync_tokens[layer_idx] == self.prefix_size
+
+                    self.quantize(
+                        key_states[:, :, self.prefix_size: self.prefix_size + tokens_to_quantize, :], 
+                        value_states[:, :, self.prefix_size: self.prefix_size + tokens_to_quantize, :], 
+                        layer_idx
+                    )
+
+                new_unquantized_tokens = n_new_tokens - self.prefix_size - tokens_to_quantize
+                if new_unquantized_tokens > 0:
+                    assert self.attention_sync_tokens[layer_idx] == self.prefix_size
+                    self.unquantized_keys[layer_idx][:, :, :new_unquantized_tokens, :] = key_states[:, :, self.prefix_size + tokens_to_quantize:, :]
+                    self.unquantized_values[layer_idx][:, :, :new_unquantized_tokens, :] = value_states[:, :, self.prefix_size + tokens_to_quantize:, :]
+                    self.unquantized_tokens[layer_idx] = new_unquantized_tokens
 
                 self.next_layer = (self.next_layer + 1) % self.n_layers
                 self.is_prefil[layer_idx] = False
             else:
                 assert n_new_tokens == 1, (key_states.shape)
-                assert 1 <= self.unquantized_tokens[layer_idx] <= self.quantization_chanks_size, (layer_idx, self.unquantized_tokens[layer_idx])
-                
-                if self.unquantized_tokens[layer_idx] == self.quantization_chanks_size:
-                    self.quantize(self.unquantized_keys[layer_idx], self.unquantized_values[layer_idx], layer_idx)
+                n_attention_sync_tokens = self.attention_sync_tokens[layer_idx]
+                if n_attention_sync_tokens < self.prefix_size:
+                    self.attention_sync_key[layer_idx][:, :, n_attention_sync_tokens: n_attention_sync_tokens + 1, :] = key_states
+                    self.attention_sync_value[layer_idx][:, :, n_attention_sync_tokens: n_attention_sync_tokens + 1, :] = value_states
+                    self.attention_sync_tokens[layer_idx] += 1
+                else:
+                    if self.unquantized_tokens[layer_idx] == self.quantization_chunks_size:
+                        self.quantize(self.unquantized_keys[layer_idx], self.unquantized_values[layer_idx], layer_idx)
 
-                    self.unquantized_keys[layer_idx] = self.make_unquantize_tensor()
-                    self.unquantized_values[layer_idx] = self.make_unquantize_tensor()
-                    self.unquantized_tokens[layer_idx] = 0
-                
-                self.unquantized_keys[layer_idx][:, :, self.unquantized_tokens[layer_idx]: self.unquantized_tokens[layer_idx] + 1, :] = key_states
-                self.unquantized_values[layer_idx][:, :, self.unquantized_tokens[layer_idx]: self.unquantized_tokens[layer_idx] + 1, :] = value_states
-                self.unquantized_tokens[layer_idx] += 1
+                        self.unquantized_keys[layer_idx] = self.make_unquantize_tensor()
+                        self.unquantized_values[layer_idx] = self.make_unquantize_tensor()
+                        self.unquantized_tokens[layer_idx] = 0
+                    
+                    self.unquantized_keys[layer_idx][:, :, self.unquantized_tokens[layer_idx]: self.unquantized_tokens[layer_idx] + 1, :] = key_states
+                    self.unquantized_values[layer_idx][:, :, self.unquantized_tokens[layer_idx]: self.unquantized_tokens[layer_idx] + 1, :] = value_states
+                    self.unquantized_tokens[layer_idx] += 1
                 
                 self.next_layer = (self.next_layer + 1) % self.n_layers
 
-            assert 1 <= self.unquantized_tokens[layer_idx] <= self.quantization_chanks_size, (layer_idx, self.unquantized_tokens[layer_idx])
+            # assert 1 <= self.unquantized_tokens[layer_idx] <= self.quantization_chunks_size, (layer_idx, self.unquantized_tokens[layer_idx])
             assert self._debug_total_tokens[layer_idx] == self.get_seq_length()
             return self.dequantize(layer_idx)
             
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
-        return self.cached_tokens[layer_idx] + self.unquantized_tokens[layer_idx]
+        return self.attention_sync_tokens[layer_idx] + self.cached_tokens[layer_idx] + self.unquantized_tokens[layer_idx]
 
 
 class TreatPrefixSeparately(transformers.cache_utils.Cache):
