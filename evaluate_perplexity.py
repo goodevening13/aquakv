@@ -32,7 +32,6 @@ def evaluate_perplexity(
     for sequence_index, input_ids in enumerate(tqdm(inps, desc="Evaluating perplexity")):
         input_ids = input_ids.to(device)
         with torch.amp.autocast("cuda", enabled=amp_dtype is not None, dtype=amp_dtype or torch.float32):
-            torch.save(input_ids, "/home/aabocharnikov/src/aquakv/real_input.pt")
             if cache_factory is None:
                 cache = DynamicCache()
             else:
@@ -40,24 +39,11 @@ def evaluate_perplexity(
             dtype = amp_dtype or next(model.parameters()).dtype
             lm_logits = torch.zeros(
                     (input_ids.shape[0], input_ids.shape[1], model.get_output_embeddings().out_features), device=device, dtype=dtype)
-            step_size = 1
             for i in range(0, input_ids.shape[1], step_size):
                 out = model(input_ids[:, i: i + step_size], use_cache=True, past_key_values=cache)
                 assert out.past_key_values is cache
                 lm_logits[:, i: i + step_size, ...] = out.logits
-                if i == 127:
-                    torch.save(lm_logits, "/home/aabocharnikov/src/aquakv/reference_logits.pt")
-                    # torch.save(out.hidden_states, "/home/aabocharnikov/src/aquakv/reference_hidden_states.pt")
-                    print(type(cache.suffix_cache.quantized_caches[0].key_states_cache[1]))
-                    for j in range(1, 28):
-                        torch.save(cache.suffix_cache.quantized_caches[0].key_states_cache[j].idx[:, 0, :], f"reference_idx_{j}.pt")
-                        torch.save(cache.suffix_cache.quantized_caches[0].key_states_cache[j].scales, f"reference_scales_{j}.pt")
-                    return
-            if sequence_index == 0:
-                print("saved")
-                torch.save(input_ids, "/home/aabocharnikov/src/aquakv/real_input.pt")
-                torch.save(lm_logits, "/home/aabocharnikov/src/aquakv/reference_logits.pt")
-                return
+
         if sequence_index < num_sequences_without_padding:
             shift_logits = lm_logits[:, :-1, :].contiguous()
             shift_labels = input_ids[:, 1:]
@@ -148,16 +134,6 @@ def make_arg_parser():
 
     return parser
 
-str_to_dtype = {
-    "float16": torch.float16,
-    "float32": torch.float32,
-    "float64": torch.float64,
-    "half": torch.half,
-    "bfloat16": torch.bfloat16,
-    "int32": torch.int32,
-    "int64": torch.int64,
-    "long": torch.long,
-}
 
 def main():
     parser = make_arg_parser()
@@ -171,13 +147,11 @@ def main():
     if args.predictors_input_path:
         key_values_predictors = torch.load(args.predictors_input_path, weights_only=False)
         key_predictors, value_predictors = key_values_predictors["key_predictors"], key_values_predictors["value_predictors"]
-        [key_predictors[i].to(device=device, dtype=str_to_dtype[args.torch_dtype]) for i in key_predictors]
-        [value_predictors[i].to(device=device, dtype=str_to_dtype[args.torch_dtype]) for i in value_predictors]
+        [key_predictors[i].to(device) for i in key_predictors]
+        [value_predictors[i].to(device) for i in value_predictors]
 
     # loading model and datasets
-    print("loading data")
     testdata = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-    print("loading model")
     config = transformers.AutoConfig.from_pretrained(args.model_name)
     model = transformers.AutoModelForCausalLM.from_pretrained(
         args.model_name, config=config, torch_dtype=args.torch_dtype, low_cpu_mem_usage=True, device_map='auto')
@@ -198,16 +172,16 @@ def main():
             cache_factory = None
         else:
             quantizer = HiggsQuantizer(
-                edenn_d=args.edenn_d,
-                edenn_n=args.edenn_n,
+                edenn_d=args.edenn_d, 
+                edenn_n=args.edenn_n, 
                 **common_quantizer_kwargs
             )
             if args.not_quantize_first_layer:
                 first_layer_quantizer = None
             else:
                 first_layer_quantizer = HiggsQuantizer(
-                    edenn_d=2,
-                    edenn_n=256,
+                    edenn_d=2, 
+                    edenn_n=256, 
                     **common_quantizer_kwargs
                 )
 
@@ -217,7 +191,7 @@ def main():
                 suffix_cache=PredictorHiggsCache(
                     config=model.config, 
                     min_buffer_size=args.recent_buffer_size,
-                    save_dequantized_values=False, # True,
+                    save_dequantized_values=True,
                     make_quantized_cache=partial(
                         SingleChunkQuantizedCacheWithPredictors,
                         quantizer=quantizer,
