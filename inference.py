@@ -6,17 +6,21 @@ import hydra
 from hydra.utils import instantiate
 from aquakv.cache_utils import InferenceCache
 
-def test(input_data, model, cache, max_len=None):
+def test(input_data, model, cache, max_len=None, prefil_size=0):
     max_len = max_len or input_data.shape[1]
     lm_logits = torch.zeros(
                     (input_data.shape[0], max_len, model.get_output_embeddings().out_features), 
                     device=input_data.device, 
                     dtype=torch.float
     )
-    for i in tqdm.tqdm(range(0, max_len)):
+    if prefil_size > 0:
+        out = model(input_data[:, :prefil_size], use_cache=True, past_key_values=cache, optimise_aquakv_inference=True)
+        lm_logits[:, :prefil_size, ...] = out.logits
+
+    for i in tqdm.tqdm(range(prefil_size, max_len)):
         out = model(input_data[:, i: i + 1], use_cache=True, past_key_values=cache, optimise_aquakv_inference=True)
         lm_logits[:, i: i + 1, ...] = out.logits
-    reference_logits = torch.load("reference_logits.pt")
+    reference_logits = torch.load("reference_logits_prefil_136.pt")
 
     for l in range(max_len):
         print(l, torch.max(torch.abs(reference_logits[0, l, :] - lm_logits[0, l, :])), torch.argmax(reference_logits[0, l, :]) == torch.argmax(lm_logits[0, l, :]))
@@ -41,7 +45,7 @@ def main(experiment_config):
     cache_kwargs["config"] = model_config
     cache_kwargs["device"] = model.device
     cache_kwargs["dtype"] = model.dtype
-    if "quantizer" in cache_kwargs:
+    if "quantizer" in cache_kwargs or "first_layer_quantizer" in cache_kwargs:
         head_dim = (
             model_config.head_dim if hasattr(model_config, "head_dim") else model_config.hidden_size // model_config.num_attention_heads
         )
@@ -52,19 +56,22 @@ def main(experiment_config):
         )
         channel_size = num_key_value_heads * head_dim
         
-        cache_kwargs["quantizer"]["channel_size"] = channel_size
-        cache_kwargs["quantizer"]["hadamard_groupsize"] = channel_size
+        for q in ["quantizer", "first_layer_quantizer"]:
+            if q in cache_kwargs:
+                cache_kwargs[q]["channel_size"] = channel_size
+                cache_kwargs[q]["hadamard_groupsize"] = channel_size
 
-        target_class_name = cache_kwargs["quantizer"]["target"]
-        cache_kwargs["quantizer"].pop("target")
-        quantizer = instantiate(dict(_target_=target_class_name, **cache_kwargs["quantizer"]))
-        cache_kwargs["quantizer"] = quantizer
+                target_class_name = cache_kwargs[q]["target"]
+                cache_kwargs[q].pop("target")
+                quantizer = instantiate(dict(_target_=target_class_name, **cache_kwargs[q]))
+                cache_kwargs[q] = quantizer
 
     cache = instantiate(cache_kwargs)
     
     if hasattr(experiment_config, "test") and experiment_config.test:
         input_data = torch.load("./real_input.pt")
-        test(input_data, model, cache, 8 * 128 + 1)
+        prefil_size = experiment_config.prefill_size if hasattr(experiment_config, "prefill_size") and experiment_config.prefill_size is not None else 0
+        test(input_data, model, cache, 8 * 128 + 1, prefil_size)
     else:
         prefix_data = torch.randint(0, model_config.vocab_size, (experiment_config.batch_size, experiment_config.prefill_size), device=model.device)
         result = torch.empty((experiment_config.batch_size, generation_length), device=model.device, dtype=int)
