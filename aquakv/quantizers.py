@@ -77,15 +77,15 @@ class HiggsQuantizer(QuantizerBase):
         idx = quantized.idx
         scales = quantized.scales
         device = scales.device
-        x = self.grid(device=device)[idx.int()].flatten(start_dim=2)  # [b, mult, C / mult / d, d] -> [b, mult, C / mult]
+        x = self.grid(device=device)[idx.int()].flatten(start_dim=-2)  # [b, mult, C / mult / d, d] -> [b, mult, C / mult]
 
         # Cut the padded values
         x = x[..., :self.hadamard_groupsize]
 
-        x = (x * scales.unsqueeze(dim=2)).half()  # [b, mult, C / mult] * [b, mult, 1]
+        x = (x * scales.unsqueeze(dim=-1)).to(x.dtype)  # [b, mult, C / mult] * [b, mult, 1]
         
         x = hadamard_transform(x, scale=self.hadamard_scale).flatten(start_dim=1)  # [b, mult, C / mult] => [b, C]
-        
+
         return x[:, :self.channel_size]
 
 
