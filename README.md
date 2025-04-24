@@ -75,5 +75,5 @@ Code supports several grids for HIGGS quantization:
     * EDENN_D = 4, EDENN_N = 256   (from [HIGGS](https://arxiv.org/abs/2411.17525))
     * EDENN_D = 8, EDENN_N = 65536 (from [quip#](https://arxiv.org/pdf/2402.04396))
 
-Additional grid configurations (e.g. d=6 n=4096) may be generated with [this notebook](https://gist.github.com/galqiwi/45ed6e56dc7495dfea82ae3b01de8bdb).
+Additional grid configurations (e.g. d=6 n=4096) may be generated with [this script](aquakv/grid_generator.py).
    
