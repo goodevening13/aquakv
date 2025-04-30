@@ -1,6 +1,7 @@
 model_name: unsloth/Llama-3.2-3B
+save_name: llama-3.2-3b_bf16_latency.npy
 
-batch_size: 4
+batch_size: 1
 generation_length: null
 prefill_size: 4
 

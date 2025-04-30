@@ -9,6 +9,13 @@ from optimum.quanto import MaxOptimizer, qint2, qint4, quantize_weight
 from collections import namedtuple
 from functools import partial
 
+try:
+    from higgs_quantization import higgs_quantize, higgs_dequantize
+except ImportError as e:
+    print("do pip install . from aquakv_kernels repo")
+    raise e
+
+
 class QuantizerBase:
     QuantizedState = TypeVar('QuantizedState')
 
@@ -20,6 +27,50 @@ class QuantizerBase:
         return self.dequantize(self.quantize(x)).to(dtype=x.dtype, device=x.device)
 
 QuantizedTensor = namedtuple("QuantizedTensor", ["idx", "scales"])
+
+class HiggsQuantizerCUDA(QuantizerBase):
+    def __init__(self, hadamard_groupsize: int, edenn_d: int, edenn_n: int, dtype, device, channel_size: int = 1024):
+        super().__init__()
+        if edenn_d != 4 or edenn_n != 256:
+            raise ValueError("not tested yet")
+        if hadamard_groupsize != channel_size:
+            raise ValueError("not supported, use hadamard_groupsize=channel_size")
+        self.grid = get_grid(dim=edenn_d, size=edenn_n, device=device).to(dtype=dtype)
+        self.channel_size = channel_size
+        self.dtype = dtype
+        self.hadamard_scale = 1 / hadamard_groupsize
+
+    def quantize(self, x):
+        assert len(x.shape) == 2, x.shape
+        channel_size = x.shape[1]
+        assert channel_size == self.channel_size
+        assert x.dtype == self.dtype, (x.dtype, self.dtype)
+        # assert x.is_contiguous()
+
+        x = x.to(dtype=torch.float32)
+        scales = torch.linalg.norm(x, axis=-1, keepdim=True)
+        x = hadamard_transform(x) / scales
+
+        idx = higgs_quantize(x.to(self.dtype), self.grid)
+
+        return QuantizedTensor(
+            idx = idx,
+            scales = scales.squeeze(dim=-1).to(self.dtype)
+        )
+
+    def dequantize(self, quantized: QuantizedTensor):
+        # assert quantized.idx.is_contiguous()
+        # assert quantized.scales.is_contiguous()
+
+        x = higgs_dequantize(
+            quantized, 
+            self.grid
+        )
+
+        x = hadamard_transform(x, scale=self.hadamard_scale).to(self.dtype)
+
+        return x
+
 
 class HiggsQuantizer(QuantizerBase):
     def __init__(self, hadamard_groupsize: int, edenn_d: int, edenn_n: int, channel_size: int = 1024, chunk_size: int = 64) -> None:
