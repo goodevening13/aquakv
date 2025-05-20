@@ -94,15 +94,8 @@ class PredictorHiggsCache(transformers.cache_utils.Cache):
             *[cache.update(empty, empty, layer_idx, empty_kwargs) for cache in self.quantized_caches
               ] + [(key_buffer, value_buffer)])
         
+        # 70B fix
         actual_device = key_buffer.device
-        # dirty hack for now, because since HiggsQuantizer does not have any parameters any more (even torch.eye)
-        # we cant rely on next(iter(self.key_states_cache[self.next_layer_idx].state_dict().values())).device like we used to
-        # and when this https://github.com/goodevening13/aquakv/blob/2dfde4898e994fd9e63492f89da4ae4d7a4aca77/aquakv/cache_utils.py#L114 happens
-        # especially this - https://github.com/goodevening13/aquakv/blob/2dfde4898e994fd9e63492f89da4ae4d7a4aca77/aquakv/cache_utils.py#L291
-        # FrozenCache(transformers.cache_utils.DynamicCache) have have keys and values from all layers on cache.key_states_cache[0].device
-        # and therefore here - https://github.com/goodevening13/aquakv/blob/2dfde4898e994fd9e63492f89da4ae4d7a4aca77/aquakv/cache_utils.py#L246
-        # it also will be on device:0 even on layer 40, because it was called with the same empty
-        # https://github.com/goodevening13/aquakv/blob/2dfde4898e994fd9e63492f89da4ae4d7a4aca77/aquakv/cache_utils.py#L315
         dequantized_key_chunks = [k.to(actual_device) for k in dequantized_key_chunks] 
         dequantized_value_chunks = [v.to(actual_device) for v in dequantized_value_chunks]
 
