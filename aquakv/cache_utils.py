@@ -93,6 +93,19 @@ class PredictorHiggsCache(transformers.cache_utils.Cache):
         dequantized_key_chunks, dequantized_value_chunks = zip(
             *[cache.update(empty, empty, layer_idx, empty_kwargs) for cache in self.quantized_caches
               ] + [(key_buffer, value_buffer)])
+        
+        actual_device = key_buffer.device
+        # dirty hack for now, because since HiggsQuantizer does not have any parameters any more (even torch.eye)
+        # we cant rely on next(iter(self.key_states_cache[self.next_layer_idx].state_dict().values())).device like we used to
+        # and when this https://github.com/goodevening13/aquakv/blob/2dfde4898e994fd9e63492f89da4ae4d7a4aca77/aquakv/cache_utils.py#L114 happens
+        # especially this - https://github.com/goodevening13/aquakv/blob/2dfde4898e994fd9e63492f89da4ae4d7a4aca77/aquakv/cache_utils.py#L291
+        # FrozenCache(transformers.cache_utils.DynamicCache) have have keys and values from all layers on cache.key_states_cache[0].device
+        # and therefore here - https://github.com/goodevening13/aquakv/blob/2dfde4898e994fd9e63492f89da4ae4d7a4aca77/aquakv/cache_utils.py#L246
+        # it also will be on device:0 even on layer 40, because it was called with the same empty
+        # https://github.com/goodevening13/aquakv/blob/2dfde4898e994fd9e63492f89da4ae4d7a4aca77/aquakv/cache_utils.py#L315
+        dequantized_key_chunks = [k.to(actual_device) for k in dequantized_key_chunks] 
+        dequantized_value_chunks = [v.to(actual_device) for v in dequantized_value_chunks]
+
         combined_key_states = torch.cat(dequantized_key_chunks, dim=-2)
         combined_value_states = torch.cat(dequantized_value_chunks, dim=-2)
 
@@ -189,7 +202,6 @@ class SingleChunkQuantizedCacheWithPredictors(transformers.cache_utils.Cache):
         saving_new_entries = key_states is not None and key_states.numel() != 0
         assert saving_new_entries == (layer_idx not in self.key_states_cache), "can only write once per layer"
         assert key_states.device == value_states.device and key_states.dtype == value_states.dtype
-
         if saving_new_entries:  # write mode
             device, dtype = key_states.device, key_states.dtype
             key_states_original, value_states_original = key_states, value_states
@@ -213,7 +225,6 @@ class SingleChunkQuantizedCacheWithPredictors(transformers.cache_utils.Cache):
                     reconstructed_key_states = self.first_layer_quantizer.dequantize(
                         self.quantized_first_layer_k_cache).view_as(key_states).to(dtype=dtype, device=device)
                     self.key_states_cache[0] = reconstructed_key_states
-
                     self.quantized_first_layer_v_cache = self.first_layer_quantizer.quantize(
                         (value_states).flatten(0, -2))
                     reconstructed_value_states = self.first_layer_quantizer.dequantize(
