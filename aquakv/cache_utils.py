@@ -93,6 +93,12 @@ class PredictorHiggsCache(transformers.cache_utils.Cache):
         dequantized_key_chunks, dequantized_value_chunks = zip(
             *[cache.update(empty, empty, layer_idx, empty_kwargs) for cache in self.quantized_caches
               ] + [(key_buffer, value_buffer)])
+        
+        # 70B fix
+        actual_device = key_buffer.device
+        dequantized_key_chunks = [k.to(actual_device) for k in dequantized_key_chunks] 
+        dequantized_value_chunks = [v.to(actual_device) for v in dequantized_value_chunks]
+
         combined_key_states = torch.cat(dequantized_key_chunks, dim=-2)
         combined_value_states = torch.cat(dequantized_value_chunks, dim=-2)
 
@@ -189,7 +195,6 @@ class SingleChunkQuantizedCacheWithPredictors(transformers.cache_utils.Cache):
         saving_new_entries = key_states is not None and key_states.numel() != 0
         assert saving_new_entries == (layer_idx not in self.key_states_cache), "can only write once per layer"
         assert key_states.device == value_states.device and key_states.dtype == value_states.dtype
-
         if saving_new_entries:  # write mode
             device, dtype = key_states.device, key_states.dtype
             key_states_original, value_states_original = key_states, value_states
@@ -213,7 +218,6 @@ class SingleChunkQuantizedCacheWithPredictors(transformers.cache_utils.Cache):
                     reconstructed_key_states = self.first_layer_quantizer.dequantize(
                         self.quantized_first_layer_k_cache).view_as(key_states).to(dtype=dtype, device=device)
                     self.key_states_cache[0] = reconstructed_key_states
-
                     self.quantized_first_layer_v_cache = self.first_layer_quantizer.quantize(
                         (value_states).flatten(0, -2))
                     reconstructed_value_states = self.first_layer_quantizer.dequantize(
