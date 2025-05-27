@@ -63,7 +63,7 @@ MODELS = [
     "Qwen2.5-0.5B-Instruct",
     "Qwen2.5-3B-Instruct",
     "Qwen2.5-7B-Instruct",
-    "Qwen2-72B"
+    "Qwen2.5-72B-Instruct"
 ]
 
 def find_free_port():

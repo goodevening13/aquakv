@@ -15,5 +15,5 @@
     "llama-3.1-70B-Instruct": 131072,
     "Qwen2.5-3B-Instruct": 131072,
     "Qwen2.5-7B-Instruct": 131072,
-    "Qwen2-72B": 131072
+    "Qwen2.5-72B-Instruct": 131072
 }
