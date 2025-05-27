@@ -52,7 +52,7 @@ def parse_args(args=None):
         "llama2-7b-chat-4k", "longchat-v1.5-7b-32k", "xgen-7b-8k", "internlm-7b-8k", "chatglm2-6b", "chatglm2-6b-32k",
         "chatglm3-6b-32k", "vicuna-v1.5-7b-16k", "llama-3.2-3B", "llama-3.2-3B-test",
         "llama-3.1-8B", "llama-3.1-70B",
-        "llama-3.2-3B-Instruct", "llama-3.1-8B-Instruct", "llama-3.1-70B-Instruct"
+        "llama-3.2-3B-Instruct", "llama-3.1-8B-Instruct", "llama-3.1-70B-Instruct", "Qwen2.5-3B-Instruct", "Qwen2.5-7B-Instruct"
     ])
     parser.add_argument('--quantize', action='store_true')
     parser.add_argument('--out_path', type=str, default="./pred", help="save predictions to this path")
