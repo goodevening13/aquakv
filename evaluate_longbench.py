@@ -63,7 +63,6 @@ MODELS = [
     "Qwen2.5-0.5B-Instruct",
     "Qwen2.5-3B-Instruct",
     "Qwen2.5-7B-Instruct",
-
 ]
 
 def find_free_port():
@@ -289,10 +288,7 @@ if __name__ == '__main__':
     dataset2prompt = json.load(open("LongBench/config/dataset2prompt.json", "r"))
     dataset2maxlen = json.load(open("LongBench/config/dataset2maxlen.json", "r"))
     # predict on each dataset
-    if args.quantize:
-        suffix = '_quantize' + str(QUANT_BITS)
-    else:
-        suffix = ''
+    suffix = ''
     if not os.path.exists(args.out_path + suffix):
         os.makedirs(args.out_path + suffix)
     if not os.path.exists("pred_e" + suffix):
