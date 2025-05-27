@@ -40,6 +40,27 @@ DATASETS = [
 ]
 
 
+
+MODELS = [
+
+    "llama2-7b-chat-4k",
+    "llama2-13b-chat-4k",
+    "longchat-v1.5-7b-32k",
+    "xgen-7b-8k",
+    "internlm-7b-8k",
+    "chatglm2-6b",
+    "chatglm2-6b-32k",
+    "chatglm3-6b-32k",
+    "vicuna-v1.5-7b-16k",
+    "llama-3.2-1B",
+    "llama-3.2-3B",
+    "llama-3.2-3B-test",
+    "Qwen2.5-0.5B-Instruct",
+    "Qwen2.5-3B-Instruct",
+    "Qwen2.5-7B-Instruct",
+
+]
+
 def find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(('', 0))
@@ -48,12 +69,7 @@ def find_free_port():
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, default=None, choices=[
-        "llama2-7b-chat-4k", "longchat-v1.5-7b-32k", "xgen-7b-8k", "internlm-7b-8k", "chatglm2-6b", "chatglm2-6b-32k",
-        "chatglm3-6b-32k", "vicuna-v1.5-7b-16k", "llama-3.2-3B", "llama-3.2-3B-test",
-        "llama-3.1-8B", "llama-3.1-70B",
-        "llama-3.2-3B-Instruct", "llama-3.1-8B-Instruct", "llama-3.1-70B-Instruct", "Qwen2.5-3B-Instruct", "Qwen2.5-7B-Instruct"
-    ])
+    parser.add_argument("--model", type=str, default=None, choices=MODELS)
     parser.add_argument('--quantize', action='store_true')
     parser.add_argument('--out_path', type=str, default="./pred", help="save predictions to this path")
     parser.add_argument("--edenn_d", type=int, default=None, help="HIGGS quantizer group dimension")
@@ -187,7 +203,7 @@ def load_model_and_tokenizer(path, model_name, device):
         replace_llama_attn_with_flash_attn()
         tokenizer = LlamaTokenizer.from_pretrained(path)
         model = LlamaForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16)
-    elif "llama-3.2" in model_name:
+    elif "llama-3.2" in model_name or "Qwen" in model_name:
         model = LlamaForCausalLMWithInputPartitioningForGenerationOnly.from_pretrained(
             path,
             trust_remote_code=True,
