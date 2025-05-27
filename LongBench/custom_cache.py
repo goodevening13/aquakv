@@ -28,7 +28,7 @@ def get_aqua_cache(device, hadamard_groupsize: int, edenn_n: int, edenn_d: int,
     # creating higgs quantizer
     common_quantizer_kwargs = dict(
         hadamard_groupsize=hadamard_groupsize,
-        channel_size=config.head_dim * config.num_key_value_heads
+        channel_size=hadamard_groupsize
     )
     if quantizer_type == "higgs":
         quantizer = HiggsQuantizer(
