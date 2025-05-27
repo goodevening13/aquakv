@@ -20,17 +20,21 @@ from datasets import load_dataset
 
 @torch.no_grad()
 def evaluate_humaneval(
-        model: nn.Module, tokenizer, device: torch.device,
+        model: nn.Module, tokenizer, save_name, device: torch.device,
         amp_dtype: Optional[torch.dtype] = None,
         cache_factory: Optional[Callable[[], DynamicCache]] = None,
-        num_samples_per_task: int = 200
+        num_samples_per_task: int = 2,
         ) -> float:
     
     def generate_one_completion(prompt):
         input_batch = [prompt for _ in range(num_samples_per_task)]
         inputs = tokenizer(input_batch, return_tensors="pt").to(model.device)
         input_ids_cutoff = inputs.input_ids.size(dim=1)
-        out = model.generate(**inputs, max_new_tokens=512, pad_token_id=tokenizer.eos_token_id, use_cache=True, past_key_values=cache_factory)
+        if cache_factory is None:
+            cache = DynamicCache()
+        else:
+            cache = cache_factory()
+        out = model.generate(**inputs, max_new_tokens=512, pad_token_id=tokenizer.eos_token_id, use_cache=True, past_key_values=cache)
 
         batch_completions = tokenizer.batch_decode(
             [ids[input_ids_cutoff:] for ids in out],
@@ -40,11 +44,13 @@ def evaluate_humaneval(
     
     problems = read_problems()
 
-    samples = [
-        dict(task_id=task_id, completion=generate_one_completion(problems[task_id]["prompt"]))
-        for task_id in tqdm(problems)
-    ]
-    write_jsonl("samples.jsonl", samples)
+    samples = []
+    for task_id in tqdm(problems):
+        generated = generate_one_completion(problems[task_id]["prompt"])
+        for j in range(num_samples_per_task):
+            samples.append(dict(task_id=task_id, completion=generated[j]))
+
+    write_jsonl(save_name, samples)
 
 
 def make_arg_parser():
@@ -126,6 +132,9 @@ def make_arg_parser():
                         default=4,
                         help="The number of first tokens that will not be quantized, because of attention sink.")
     parser.add_argument("--no_quant", action="store_true", help="Do not quantize.")
+    parser.add_argument("--save_name",
+                        type=str,
+                        default="samples.jsonl")
 
     return parser
 
@@ -180,7 +189,7 @@ def main():
                 )
             )
 
-        evaluate_humaneval(model, tokenizer, device=device, cache_factory=cache_factory, num_samples_per_task=200)
+        evaluate_humaneval(model, tokenizer, save_name=args.save_name, device=device, cache_factory=cache_factory, num_samples_per_task=200)
 
 
 if __name__ == "__main__":
