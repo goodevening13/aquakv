@@ -5,7 +5,6 @@ from typing import TypeVar
 import torch
 from fast_hadamard_transform import hadamard_transform
 from .edenn import higgs_quantize_dequantize, pad_to_block, HadLinear
-from optimum.quanto import MaxOptimizer, qint2, qint4, quantize_weight
 
 
 class QuantizerBase:
@@ -84,6 +83,7 @@ class QuantoQuantizer(QuantizerBase):
     """
 
     def __init__(self, nbits: int, q_group_size: int = 64, axis: int = 0):
+        from optimum.quanto import MaxOptimizer, qint2, qint4, quantize_weight
         super().__init__()
         self.nbits, self.axis, self.q_group_size = nbits, axis, q_group_size
         if self.nbits not in [2, 4]:
