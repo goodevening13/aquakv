@@ -145,6 +145,7 @@ def batch_inference(model, tokenizer, inference_texts, cache):
         response_batch.append(output)
         pred = extract_answer(output)
         pred_batch.append(pred)
+    breakpoint()
     return pred_batch, response_batch
 
 
@@ -218,7 +219,7 @@ def main():
         key_predictors=key_predictors,
         value_predictors=value_predictors,
         quantizer_type="higgs",
-        not_quantize_first_layer=False
+        not_quantize_first_layer=not args.quantize_first_layer
     )
 
 
@@ -290,6 +291,7 @@ if __name__ == "__main__":
     parser.add_argument("--recent_buffer_size", type=int)
     parser.add_argument("--prefix_size", type=int, default=4)
     parser.add_argument("--predictors", type=str)
+    parser.add_argument("--quantize_first_layer", action="store_true")
 
     args = parser.parse_args()
 
