@@ -145,7 +145,6 @@ def batch_inference(model, tokenizer, inference_texts, cache):
         response_batch.append(output)
         pred = extract_answer(output)
         pred_batch.append(pred)
-    breakpoint()
     return pred_batch, response_batch
 
 
