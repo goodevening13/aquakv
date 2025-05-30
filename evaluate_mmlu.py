@@ -134,9 +134,15 @@ def batch_inference(model, tokenizer, inference_texts, cache):
         max_new_tokens=max_new_tokens, stop_strings=["Question:"],
         do_sample=False, num_beams=1
     )
-    outputs = model.generate(inference_batch, generation_config, tokenizer=tokenizer,
-                             use_cache=True, past_key_values=cache("cuda:0"),
-                             attention_mask=tokenized.attention_mask.cuda())
+    if cache is not None:
+        outputs = model.generate(inference_batch, generation_config, tokenizer=tokenizer,
+                                 use_cache=True, past_key_values=cache("cuda:0"),
+                                 attention_mask=tokenized.attention_mask.cuda())
+    else:
+        
+        outputs = model.generate(inference_batch, generation_config, tokenizer=tokenizer,
+                                     attention_mask=tokenized.attention_mask.cuda())
+
     logging.info(str(len(inference_batch)) + "size batch costing time: " + str(time.time() - start))
     response_batch = []
     pred_batch = []
@@ -206,20 +212,28 @@ def eval_cot(subject, model, tokenizer, val_df, test_df, output_path, cache):
 def main():
     model, tokenizer, config = load_model()
 
-    key_values = torch.load(args.predictors, weights_only=False)
-    key_predictors, value_predictors = key_values["key_predictors"], key_values["value_predictors"]    
-    cache = partial(get_aqua_cache,
-        hadamard_groupsize=args.hadamard_groupsize,
-        edenn_n=args.edenn_n,
-        edenn_d=args.edenn_d,
-        recent_buffer_size=args.recent_buffer_size,
-        prefix_size=args.prefix_size,
-        config=config,
-        key_predictors=key_predictors,
-        value_predictors=value_predictors,
-        quantizer_type="higgs",
-        not_quantize_first_layer=not args.quantize_first_layer
-    )
+    if (not args.not_quantize) and args.predictors is not None:
+        key_values = torch.load(args.predictors, weights_only=False)
+        key_predictors, value_predictors = key_values["key_predictors"], key_values["value_predictors"]    
+    else:
+        key_predictors = None
+        value_predictors = None
+
+    if args.not_quantize:
+        cache = None
+    else:
+        cache = partial(get_aqua_cache,
+            hadamard_groupsize=args.hadamard_groupsize,
+            edenn_n=args.edenn_n,
+            edenn_d=args.edenn_d,
+            recent_buffer_size=args.recent_buffer_size,
+            prefix_size=args.prefix_size,
+            config=config,
+            key_predictors=key_predictors,
+            value_predictors=value_predictors,
+            quantizer_type="higgs",
+            not_quantize_first_layer=not args.quantize_first_layer
+        )
 
 
     
@@ -291,6 +305,7 @@ if __name__ == "__main__":
     parser.add_argument("--prefix_size", type=int, default=4)
     parser.add_argument("--predictors", type=str)
     parser.add_argument("--quantize_first_layer", action="store_true")
+    parser.add_argument("--not_quantize", action="store_true")
 
     args = parser.parse_args()
 
