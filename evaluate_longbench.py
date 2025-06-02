@@ -209,7 +209,7 @@ def load_model_and_tokenizer(path, model_name, device):
         tokenizer = LlamaTokenizer.from_pretrained(path)
         model = LlamaForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16)
     elif "llama-3.1" in model_name or "llama-3.2" in model_name or "Qwen" in model_name:
-        model = AutoModelForCausalLM.from_pretrained(
+        model = LlamaForCausalLMWithInputPartitioningForGenerationOnly.from_pretrained(
             path,
             trust_remote_code=True,
             torch_dtype=torch.bfloat16  # float16
