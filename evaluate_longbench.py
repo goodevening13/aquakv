@@ -114,9 +114,9 @@ def build_chat(tokenizer, prompt, model_name):
         prompt = header + f" ### Human: {prompt}\n###"
     elif "internlm" in model_name:
         prompt = f"<|User|>:{prompt}<eoh>\n<|Bot|>:"
+    elif model_name.lower().endswith("instruct"):
         prompt = tokenizer.apply_chat_template([{'role': 'user', 'content': prompt}],
-                                               tokenize=False, add_generation_prompt=True)
-
+                                       tokenize=False, add_generation_prompt=True)
         if prompt.startswith(tokenizer.bos_token):  # BOS will be added again in tokenization
             prompt = prompt[len(tokenizer.bos_token):]
 
