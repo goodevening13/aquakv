@@ -32,7 +32,7 @@ for file in grids_folder.iterdir():
         GRIDS[dim] = GRIDS.get(dim, {})
         if size in GRIDS[dim]:
             warnings.warn(f"Got multiple grids for {dim=} {size=}, overriding with {file}")
-        GRIDS[dim][size] = torch.load(file, map_location='cpu').to(torch.float32)
+        GRIDS[dim][size] = torch.load(file, map_location='cpu')
 
 GRID_NORMS = {k1: {k2: torch.linalg.norm(GRIDS[k1][k2], dim=1) ** 2 for k2 in v1.keys()} for k1, v1 in GRIDS.items()}
 
