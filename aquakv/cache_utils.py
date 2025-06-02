@@ -316,10 +316,18 @@ class FrozenCache(transformers.cache_utils.DynamicCache):
 def get_past_key_values(
         cache: transformers.cache_utils.Cache, config: transformers.PretrainedConfig,
         batch_size: int, device: torch.device, dtype: torch.dtype) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+    
+    if hasattr(config, "head_dim"):
+        head_dim = config.head_dim
+    # Qwen config doesn't have `head_dim`. It can inferred.
+    elif hasattr(config, "hidden_size") and hasattr(config, "num_attention_heads"):
+        head_dim = config.hidden_size // config.num_attention_heads
+    else:
+        raise RuntimeError("Head dim cannot be inferred.")
     empty = torch.zeros(
-        batch_size, config.num_key_value_heads, 0, config.head_dim, device=device, dtype=dtype)
+        batch_size, config.num_key_value_heads, 0, head_dim, device=device, dtype=dtype)
     empty_rotary_coeffs = torch.zeros(
-        batch_size, config.num_key_value_heads, 0, config.head_dim, device=device, dtype=dtype)
+        batch_size, config.num_key_value_heads, 0, head_dim, device=device, dtype=dtype)
 
     past_key_values = []
     for layer_idx in range(config.num_hidden_layers):
