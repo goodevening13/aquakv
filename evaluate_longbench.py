@@ -212,8 +212,9 @@ def load_model_and_tokenizer(path, model_name, device):
         model = LlamaForCausalLMWithInputPartitioningForGenerationOnly.from_pretrained(
             path,
             trust_remote_code=True,
-            torch_dtype=torch.bfloat16  # float16
-        ).to(device)
+            torch_dtype=torch.bfloat16,  # float16
+            device_map='auto'
+        )
         tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
     else:
         raise NotImplementedError(f"Could not load {model_name}")
