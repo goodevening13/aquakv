@@ -117,7 +117,7 @@ def build_chat(tokenizer, prompt, model_name):
     elif model_name.lower().endswith("instruct"):
         prompt = tokenizer.apply_chat_template([{'role': 'user', 'content': prompt}],
                                        tokenize=False, add_generation_prompt=True)
-        if prompt.startswith(tokenizer.bos_token):  # BOS will be added again in tokenization
+        if tokenizer.bos_token and prompt.startswith(tokenizer.bos_token):  # BOS will be added again in tokenization
             prompt = prompt[len(tokenizer.bos_token):]
 
     return prompt
