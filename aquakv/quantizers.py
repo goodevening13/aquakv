@@ -10,7 +10,7 @@ from collections import namedtuple
 from functools import partial
 
 try:
-    from higgs_quantization import higgs_quantize, higgs_dequantize
+    from higgs_quantization import higgs_quantize, higgs_dequantize, higgs_dequantize_full
 except ImportError as e:
     print("do pip install . from aquakv_kernels repo")
     raise e
@@ -35,7 +35,12 @@ class HiggsQuantizerCUDA(QuantizerBase):
             raise ValueError("not tested yet")
         if hadamard_groupsize != channel_size:
             raise ValueError("not supported, use hadamard_groupsize=channel_size")
-        self.grid = get_grid(dim=edenn_d, size=edenn_n, device=device).to(dtype=dtype)
+        self.grid = dict()
+        if type(device) != list:
+            device = [device]
+        for d in device:
+            print(d, type(d))
+            self.grid[d] = get_grid(dim=edenn_d, size=edenn_n, device=d).to(dtype=dtype)
         self.channel_size = channel_size
         self.dtype = dtype
         self.hadamard_scale = 1 / hadamard_groupsize
@@ -45,13 +50,13 @@ class HiggsQuantizerCUDA(QuantizerBase):
         channel_size = x.shape[1]
         assert channel_size == self.channel_size
         assert x.dtype == self.dtype, (x.dtype, self.dtype)
-        # assert x.is_contiguous()
+        assert x.is_contiguous()
 
         x = x.to(dtype=torch.float32)
         scales = torch.linalg.norm(x, axis=-1, keepdim=True)
         x = hadamard_transform(x) / scales
 
-        idx = higgs_quantize(x.to(self.dtype), self.grid)
+        idx = higgs_quantize(x.to(self.dtype), self.grid[str(x.device)])
 
         return QuantizedTensor(
             idx = idx,
@@ -59,17 +64,26 @@ class HiggsQuantizerCUDA(QuantizerBase):
         )
 
     def dequantize(self, quantized: QuantizedTensor):
-        # assert quantized.idx.is_contiguous()
-        # assert quantized.scales.is_contiguous()
+        assert quantized.idx.is_contiguous()
+        assert quantized.scales.is_contiguous()
 
         x = higgs_dequantize(
             quantized, 
-            self.grid
+            self.grid[str(quantized.idx.device)]
         )
 
         x = hadamard_transform(x, scale=self.hadamard_scale).to(self.dtype)
 
         return x
+    
+    def full_dequantize(self, quantized: QuantizedTensor, add: torch.Tensor, out: torch.Tensor):
+        higgs_dequantize_full(
+            quantized, 
+            self.grid[str(add.device)],
+            add,
+            out,
+            self.hadamard_scale
+        )
 
 
 class HiggsQuantizer(QuantizerBase):

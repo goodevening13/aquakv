@@ -1,7 +1,7 @@
 model_name: unsloth/Llama-3.2-3B
-# save_name: llama-3.2-3b_aquakv_bs=22_throuput.npy # llama-3.2-3b_aquakv_latency.npy # 
+save_name: llama-3.2-3b_aquakv_pred_only_latency.npy # llama-3.2-3b_aquakv_latency.npy # 
 
-batch_size: 22 # 1
+batch_size: 1 # 22 # 16
 generation_length: null
 prefill_size: 4
 

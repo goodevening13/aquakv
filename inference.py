@@ -16,15 +16,9 @@ from aquakv.quantizers import HiggsQuantizer
 @torch.no_grad()
 def main(experiment_config):
     model_config = transformers.AutoConfig.from_pretrained(experiment_config.model_name)  
-    multi_gpu = '70B' in experiment_config.model_name
-    if multi_gpu:
-        layer_device_map = {i: "cuda:0" for i in range(40)} | {i: "cuda:1" for i in range(40, 80)}    
-    else:
-        layer_device_map = None
     
     device_map = "auto"
     dtype = torch.bfloat16
-    
     model = transformers.AutoModelForCausalLM.from_pretrained(
         experiment_config.model_name, 
         config=model_config, 
@@ -32,12 +26,21 @@ def main(experiment_config):
         low_cpu_mem_usage=True, 
         device_map=device_map,
     )
+
+    multi_gpu = '70B' in experiment_config.model_name
+    if multi_gpu:
+        layer_device_map = {i: "cuda:0" for i in range(40)} | {i: "cuda:1" for i in range(40, 80)}    
+        cache_device = ["cuda:0", "cuda:1"]
+    else:
+        layer_device_map = None
+        cache_device = model.device
+    
     # print('loaded model')
     # time.sleep(15)
     # print("model sleep ended")
     generation_length = getattr(experiment_config, "generation_length", None) or model_config.max_position_embeddings
 
-    if False:
+    if True:
         cache_kwargs = OmegaConf.to_container(experiment_config.cache, resolve=True)
         
         if not hasattr(model_config, "num_key_value_heads"):
@@ -47,6 +50,7 @@ def main(experiment_config):
         
         # model_config.num_key_value_heads //= world_size
 
+        cache_kwargs["_convert_"] = "all"
         cache_kwargs["config"] = model_config
         cache_kwargs["device"] = model.device
         cache_kwargs["dtype"] = model.dtype
@@ -58,10 +62,11 @@ def main(experiment_config):
             
             for q in ["quantizer", "first_layer_quantizer"]:
                 if q in cache_kwargs:
+                    cache_kwargs[q]["_convert_"] = "all"
                     cache_kwargs[q]["channel_size"] = channel_size
                     cache_kwargs[q]["hadamard_groupsize"] = channel_size
                     if "device" in cache_kwargs[q]:
-                        cache_kwargs[q]["device"] = model.device
+                        cache_kwargs[q]["device"] = cache_device
                     if "dtype" in cache_kwargs[q]:
                         cache_kwargs[q]["dtype"] = model.dtype
 
@@ -138,6 +143,9 @@ def main(experiment_config):
         result[:, i + 1: i + 1 + step_size] = torch.argmax(out.logits, dim=-1)
         if i % 1_000 == 0:
             np.save(experiment_config.save_name, np.array(times))
+        
+        if i >= 32_500:
+            break
 
 # python my_app.py --config-name alt_config.yaml
 
