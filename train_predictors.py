@@ -5,12 +5,12 @@ from typing import Sequence, Optional, List, Tuple
 import torch
 import torch.nn as nn
 import transformers
-from tqdm import trange
+from tqdm import tqdm, trange
 
 from aquakv import datautils, modelutils
 from aquakv.quantizers import QuantizerBase, HiggsQuantizer
 from aquakv.linear_utils import fit_linear_regression
-
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, repeat_kv
 
 class OutputCatcher(nn.Module):
     """Wraps a layer to catch its output tensors from one or more forward passes"""
@@ -35,7 +35,7 @@ def get_predictor(args: Namespace, predictor_inputs: List[torch.Tensor], targets
     Y = torch.stack(targets, dim=0)
     assert X.shape[:-1] == Y.shape[:-1] == (args.total_nsamples, args.model_seqlen)
     train_ids, valid_ids = torch.randperm(
-        len(X), generator=torch.Generator(X.device).manual_seed(args.seed), device=X.device
+        len(X), generator=torch.Generator(X.device).manual_seed(args.seed), device="cpu"
     ).split_with_sizes((args.total_nsamples - args.valid_nsamples, args.valid_nsamples))
     X_train, X_valid, Y_train, Y_valid = X[train_ids], X[valid_ids], Y[train_ids], Y[valid_ids]
     X_train, X_valid, Y_train, Y_valid = [t.flatten(0, -2) for t in (X_train, X_valid, Y_train, Y_valid)]
@@ -52,6 +52,69 @@ def get_predictor(args: Namespace, predictor_inputs: List[torch.Tensor], targets
     mse_valid = compute_relative_mse(
         predictor, X_valid, Y_valid, compute_device=device, chunk_size=args.chunk_size)
     return predictor, mse_train, mse_valid
+
+def compute_causal_mask(q_len, k_len, device):
+    mask = torch.tril(torch.ones((1, 1, q_len, k_len), dtype=torch.float32, device=device))
+    mask = mask.masked_fill(mask == 0, float('-inf'))
+    mask = mask.masked_fill(mask == 1, float(0.0))
+    return mask
+
+
+@torch.no_grad()
+def attention_weights_error(keys, reference_next_layers_keys, next_layer_queries, model, layer, predictor, args):
+    bsz = keys.shape[0]
+    device = args.devices[0]
+    _, valid_ids = torch.randperm(
+        bsz, generator=torch.Generator("cpu").manual_seed(args.seed), device="cpu"
+    ).split_with_sizes((args.total_nsamples - args.valid_nsamples, args.valid_nsamples))
+    valid_ids = valid_ids.to(device)
+    predicted_next_layer_keys = predictor(keys[valid_ids])
+    
+    reference_attention_score = compute_attention_score(model, layer, reference_next_layers_keys[valid_ids], next_layer_queries[valid_ids], device)
+    predicted_attention_score = compute_attention_score(model, layer, predicted_next_layer_keys, next_layer_queries[valid_ids], device)
+    print("attention score shapes", reference_attention_score.shape, predicted_attention_score.shape)
+
+    # [16, 24, 8192, 8192]
+    rmse_heads = []
+    stds = []
+    mask = torch.tril(torch.ones((1, predicted_attention_score.shape[1], reference_attention_score.shape[2], reference_attention_score.shape[3]), dtype=torch.int))
+    non_zero_elems = mask.sum()
+    for i in tqdm(range(args.valid_nsamples), desc="computing rmse and std"):
+        xb, yb = [tensor[i: i + 1].to(device=device, non_blocking=True) for tensor in (predicted_attention_score, reference_attention_score)]
+        rmse_head = torch.square(xb - yb)[mask.bool()].sum() / non_zero_elems # [b, n_heads, q_len, q_len] = [1, 24, 8k, 8k] => [24]
+        std = rmse_head / yb[mask.bool()].std()
+        stds.append(std)
+        rmse_heads.append(rmse_head)
+    rmse_batch_heads = torch.stack(rmse_heads) # [16, 24]
+    stds = torch.stack(stds)
+    rmse_heads = rmse_batch_heads.sum(dim=0) / args.valid_nsamples # [16, 24] => [24]
+    std = stds.sum(dim=0) / args.valid_nsamples
+    print(rmse_heads)
+    print(std)
+
+@torch.no_grad()
+def compute_attention_score(model, layer, keys, queries, device):
+    bsz, q_len = queries.shape[0], queries.shape[2]
+    position_ids = torch.arange(q_len).unsqueeze(dim=0)
+    position_embeddings = model.model.rotary_emb(keys, position_ids)
+    cos, sin = position_embeddings
+    sin = sin.to(device=device)
+    cos = cos.to(device=device)
+    query_states = queries.view(bsz, q_len, layer.self_attn.num_heads, layer.self_attn.head_dim).transpose(1, 2)
+    key_states = keys.view(bsz, q_len, layer.self_attn.num_key_value_heads, layer.self_attn.head_dim).transpose(1, 2)
+
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+    key_states = repeat_kv(key_states, layer.self_attn.num_key_value_groups)
+    attn_weights = []
+    causal_mask = compute_causal_mask(q_len, q_len, device=key_states.device)
+    for i in tqdm(range(bsz), desc="computing attention scores"):
+        attn_weight = torch.matmul(query_states[i: i + 1], key_states[i: i + 1].transpose(2, 3)) / math.sqrt(layer.self_attn.head_dim) # [b, n_heads, q_len, k_len]
+        attn_weight += causal_mask
+        attn_weight = nn.functional.softmax(attn_weight, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_weight = attn_weight.squeeze(dim=0).cpu()
+        attn_weights.append(attn_weight)
+    attn_weights = torch.stack(attn_weights)
+    return attn_weights
 
 
 @torch.no_grad()
@@ -227,6 +290,7 @@ def main():
         use_cache=False
     )
     config = transformers.AutoConfig.from_pretrained(args.model_name)
+    print(model.config._attn_implementation)
 
     data = datautils.get_loaders(
         args.dataset,
@@ -234,6 +298,7 @@ def main():
         seed=args.seed,
         model_path=args.model_name,
         seqlen=args.model_seqlen,
+        args=args
     )
 
     common_quantizer_kwargs = dict(
@@ -286,6 +351,7 @@ def main():
 
         layer.self_attn.k_proj = OutputCatcher(layer.self_attn.k_proj, args.offload_activations)
         layer.self_attn.v_proj = OutputCatcher(layer.self_attn.v_proj, args.offload_activations)
+        layer.self_attn.q_proj = OutputCatcher(layer.self_attn.q_proj, args.offload_activations)
 
         modelutils.update_outs_inplace_(args.devices, layer, inps, outs, **forward_args, compute_mse=False)
 
@@ -297,13 +363,15 @@ def main():
         assert all(elem.shape[0] == 1 for elem in attn_values)
         attn_values = [elem[0] for elem in attn_values]
 
+        key_states = torch.stack(layer.self_attn.k_proj.outputs).to(device=args.devices[0])
+        query_states = torch.stack(layer.self_attn.q_proj.outputs).to(device=args.devices[0])    
+
         layer.self_attn.k_proj = layer.self_attn.k_proj.inner
         layer.self_attn.v_proj = layer.self_attn.v_proj.inner
-
+        layer.self_attn.q_proj = layer.self_attn.q_proj.inner
+        
         layers[layer_index] = layer.to(device=layer_device_original, dtype=layer_dtype_original)
-        del layer
-        torch.cuda.empty_cache()
-
+        
         inps, outs = outs, inps
 
         if layer_index == 0:
@@ -320,8 +388,14 @@ def main():
             key_predictor, mse_train_keys, mse_valid_keys = None, 10000, 10000
         else:
             key_predictor, mse_train_keys, mse_valid_keys = get_predictor(args, key_predictor_inputs, attn_keys)
-        
-        attn_keys = get_dequant_values(args, quantizer if layer_index != 0 else first_layer_quantizer, key_predictor, key_predictor_inputs, attn_keys)
+
+            prev_layer_keys = torch.stack(key_predictor_inputs).to(device=args.devices[0])
+            attention_weights_error(prev_layer_keys, key_states, query_states, model, layer, key_predictor, args)
+
+            del layer
+            torch.cuda.empty_cache()
+
+        # attn_keys = get_dequant_values(args, quantizer if layer_index != 0 else first_layer_quantizer, key_predictor, key_predictor_inputs, attn_keys)
         del key_predictor_inputs
         if layer_index != 0:
             key_predictors[layer_index] = key_predictor.cpu()

@@ -187,6 +187,7 @@ def get_loaders(
     model_path=None,
     use_fast_tokenizer=False,
     trust_remote_code=None,
+    args=None
 ):
     """
     Loads and prepares data for a Transformers model.
@@ -228,13 +229,20 @@ def get_loaders(
             )
     else:
         tokenizer = AutoTokenizer.from_pretrained(
-            model_path, use_fast=use_fast_tokenizer, trust_remote_code=trust_remote_code
+            model_path#, use_fast=use_fast_tokenizer, trust_remote_code=trust_remote_code
         )
 
         if name.lower() == "wikitext2":
             data = get_wikitext2(nsamples, seqlen, tokenizer, eval_mode=eval_mode)
         elif name.lower() == "pajama":
             data = get_red_pajama(nsamples, seqlen, tokenizer, eval_mode=eval_mode)
+            data_dump = torch.stack(data)
+            # _, valid_ids = torch.randperm(args.total_nsamples, generator=torch.Generator("cpu").manual_seed(args.seed), device="cpu"
+            # ).split_with_sizes((args.total_nsamples - args.valid_nsamples, args.valid_nsamples))
+            # print(data_dump[valid_ids].shape)
+            # print(valid_ids)
+            # print(data_dump[valid_ids])
+            # torch.save(data_dump[valid_ids].cpu(), "/mnt/data/kv_cahce_exps/heads_project/validation_inputs_dump.pt")
         elif name.lower() == "ptb":
             data = get_ptb(nsamples, seqlen, tokenizer, eval_mode=eval_mode)
         elif name.lower() == "ptb_new":
