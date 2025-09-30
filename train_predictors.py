@@ -25,6 +25,20 @@ class OutputCatcher(nn.Module):
         output = self.inner(inp)
         self.outputs.append(output.to('cpu' if self.offload_activations else inp.device, copy=True))
         return output
+    
+class OutputCatcherMultiInput(nn.Module):
+    """Wraps a layer to catch its output tensors from one or more forward passes"""
+
+    def __init__(self, inner: nn.Module, offload_activations: bool):
+        super().__init__()
+        self.inner = inner
+        self.offload_activations = offload_activations
+        self.outputs = []
+
+    def forward(self, **kwargs):
+        output = self.inner(**kwargs)
+        self.outputs.append(output[0].to('cpu'))
+        return output
 
 
 def get_predictor(args: Namespace, predictor_inputs: List[torch.Tensor], targets: List[torch.Tensor]
@@ -61,7 +75,7 @@ def compute_causal_mask(q_len, k_len, device):
 
 
 @torch.no_grad()
-def attention_weights_error(keys, reference_next_layers_keys, next_layer_queries, model, layer, predictor, args):
+def attention_weights_error(keys, reference_next_layers_keys, next_layer_queries, model, layer, predictor, args, reference_attention_output, value_states):
     bsz = keys.shape[0]
     device = args.devices[0]
     _, valid_ids = torch.randperm(
@@ -72,29 +86,49 @@ def attention_weights_error(keys, reference_next_layers_keys, next_layer_queries
     
     reference_attention_score = compute_attention_score(model, layer, reference_next_layers_keys[valid_ids], next_layer_queries[valid_ids], device)
     predicted_attention_score = compute_attention_score(model, layer, predicted_next_layer_keys, next_layer_queries[valid_ids], device)
-    print("attention score shapes", reference_attention_score.shape, predicted_attention_score.shape)
+    # print("attention score shapes", reference_attention_score.shape, predicted_attention_score.shape)
+
+    value_states = value_states[valid_ids].view(args.valid_nsamples, next_layer_queries.shape[1], layer.self_attn.num_key_value_heads, layer.self_attn.head_dim).transpose(1, 2)
+    value_states = repeat_kv(value_states, layer.self_attn.num_key_value_groups)
+    attn_output = torch.matmul(reference_attention_score.to(device=value_states.device), value_states)
+    attn_output = attn_output.transpose(1, 2).contiguous()
+    attn_output = attn_output.reshape(args.valid_nsamples, next_layer_queries.shape[1], -1)
+
+    attention_output = layer.self_attn.o_proj(attn_output)
+    valid_ids = valid_ids.cpu()
+    reference_attention_output = reference_attention_output[valid_ids].to(device=attention_output.device)
+    abs_error = torch.abs(attention_output - reference_attention_output)
+    relative_error = abs_error / (reference_attention_output + 1e-8)
+    # print("Attention recreation error: mean abs error ", abs_error.mean().item(), "mean relative error ", relative_error.mean().item())
 
     # [16, 24, 8192, 8192]
-    rmse_heads = []
-    stds = []
-    mask = torch.tril(torch.ones((1, predicted_attention_score.shape[1], reference_attention_score.shape[2], reference_attention_score.shape[3]), dtype=torch.int))
+    n_heads = predicted_attention_score.shape[1]
+    rmse_heads = [[] for _ in range(n_heads)]
+    stds = [[] for _ in range(n_heads)]
+
+    mask = torch.tril(torch.ones((reference_attention_score.shape[2], reference_attention_score.shape[3]), dtype=torch.int))
     non_zero_elems = mask.sum()
     for i in tqdm(range(args.valid_nsamples), desc="computing rmse and std"):
-        xb, yb = [tensor[i: i + 1].to(device=device, non_blocking=True) for tensor in (predicted_attention_score, reference_attention_score)]
-        rmse_head = torch.square(xb - yb)[mask.bool()].sum() / non_zero_elems # [b, n_heads, q_len, q_len] = [1, 24, 8k, 8k] => [24]
-        std = rmse_head / yb[mask.bool()].std()
-        stds.append(std)
-        rmse_heads.append(rmse_head)
-    rmse_batch_heads = torch.stack(rmse_heads) # [16, 24]
+        for j in range(n_heads):
+            xb, yb = [tensor[i, j].to(device=device, non_blocking=True) for tensor in (predicted_attention_score, reference_attention_score)]
+            rmse_head = torch.square(xb - yb)[mask.bool()].sum() / non_zero_elems # [b, 1, q_len, q_len] = [32, 1, 1k, 1k]
+            std = rmse_head / yb[mask.bool()].std()
+            stds[j].append(std)
+            rmse_heads[j].append(rmse_head)
+    
+    rmse_heads = [torch.stack(h) for h in rmse_heads]
+    rmse_heads = torch.stack(rmse_heads) # [valid_nsamples, n_heads]
+    rmse_heads = rmse_heads.mean(dim=0)
+
+    stds = [torch.stack(h) for h in stds]
     stds = torch.stack(stds)
-    rmse_heads = rmse_batch_heads.sum(dim=0) / args.valid_nsamples # [16, 24] => [24]
-    std = stds.sum(dim=0) / args.valid_nsamples
-    print(rmse_heads)
-    print(std)
+    std = stds.mean(dim=0)
+    print(f"RMSE = {rmse_heads}, STD = {std}")
+
 
 @torch.no_grad()
 def compute_attention_score(model, layer, keys, queries, device):
-    bsz, q_len = queries.shape[0], queries.shape[2]
+    bsz, q_len = queries.shape[0], queries.shape[1]
     position_ids = torch.arange(q_len).unsqueeze(dim=0)
     position_embeddings = model.model.rotary_emb(keys, position_ids)
     cos, sin = position_embeddings
@@ -352,8 +386,12 @@ def main():
         layer.self_attn.k_proj = OutputCatcher(layer.self_attn.k_proj, args.offload_activations)
         layer.self_attn.v_proj = OutputCatcher(layer.self_attn.v_proj, args.offload_activations)
         layer.self_attn.q_proj = OutputCatcher(layer.self_attn.q_proj, args.offload_activations)
+        layer.self_attn = OutputCatcherMultiInput(layer.self_attn, args.offload_activations)
 
         modelutils.update_outs_inplace_(args.devices, layer, inps, outs, **forward_args, compute_mse=False)
+
+        reference_attention_output = torch.stack(layer.self_attn.outputs).squeeze(dim=1)
+        layer.self_attn = layer.self_attn.inner
 
         attn_keys = layer.self_attn.k_proj.outputs
         assert all(elem.shape[0] == 1 for elem in attn_keys)
@@ -363,14 +401,14 @@ def main():
         assert all(elem.shape[0] == 1 for elem in attn_values)
         attn_values = [elem[0] for elem in attn_values]
 
-        key_states = torch.stack(layer.self_attn.k_proj.outputs).to(device=args.devices[0])
-        query_states = torch.stack(layer.self_attn.q_proj.outputs).to(device=args.devices[0])    
-
+        key_states = torch.stack(layer.self_attn.k_proj.outputs).to(device=args.devices[0]).squeeze(dim=1)
+        query_states = torch.stack(layer.self_attn.q_proj.outputs).to(device=args.devices[0]).squeeze(dim=1)
+        value_states = torch.stack(layer.self_attn.v_proj.outputs).to(device=args.devices[0]).squeeze(dim=1)
+        # print("reference_attention_output shape", reference_attention_output.shape, "value shapes", value_states.shape)
         layer.self_attn.k_proj = layer.self_attn.k_proj.inner
         layer.self_attn.v_proj = layer.self_attn.v_proj.inner
         layer.self_attn.q_proj = layer.self_attn.q_proj.inner
-        
-        layers[layer_index] = layer.to(device=layer_device_original, dtype=layer_dtype_original)
+
         
         inps, outs = outs, inps
 
@@ -390,8 +428,9 @@ def main():
             key_predictor, mse_train_keys, mse_valid_keys = get_predictor(args, key_predictor_inputs, attn_keys)
 
             prev_layer_keys = torch.stack(key_predictor_inputs).to(device=args.devices[0])
-            attention_weights_error(prev_layer_keys, key_states, query_states, model, layer, key_predictor, args)
+            attention_weights_error(prev_layer_keys, key_states, query_states, model, layer, key_predictor, args, reference_attention_output, value_states)
 
+            layers[layer_index] = layer.to(device=layer_device_original, dtype=layer_dtype_original)
             del layer
             torch.cuda.empty_cache()
 
