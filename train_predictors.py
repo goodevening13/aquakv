@@ -99,9 +99,9 @@ def attention_weights_error(keys, reference_next_layers_keys, next_layer_queries
     reference_attention_output = reference_attention_output[valid_ids].to(device=attention_output.device)
     abs_error = torch.abs(attention_output - reference_attention_output)
     relative_error = abs_error / (reference_attention_output + 1e-8)
-    # print("Attention recreation error: mean abs error ", abs_error.mean().item(), "mean relative error ", relative_error.mean().item())
+    print("Attention recreation error: mean abs error ", abs_error.mean().item(), "mean relative error ", relative_error.mean().item())
 
-    # [16, 24, 8192, 8192]
+    # [16, 24, 1024, 1024]
     n_heads = predicted_attention_score.shape[1]
     rmse_heads = [[] for _ in range(n_heads)]
     stds = [[] for _ in range(n_heads)]
