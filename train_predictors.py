@@ -75,7 +75,19 @@ def compute_causal_mask(q_len, k_len, device):
 
 
 @torch.no_grad()
-def attention_weights_error(keys, reference_next_layers_keys, next_layer_queries, model, layer, predictor, args, reference_attention_output, value_states):
+def attention_weights_error(
+    keys, 
+    reference_next_layers_keys, 
+    next_layer_queries, 
+    model, 
+    layer, 
+    predictor, 
+    args, 
+    reference_attention_output, 
+    value_states,
+    layer_params: dict,
+    layer_number: int
+):
     bsz = keys.shape[0]
     device = args.devices[0]
     _, valid_ids = torch.randperm(
@@ -84,11 +96,11 @@ def attention_weights_error(keys, reference_next_layers_keys, next_layer_queries
     valid_ids = valid_ids.to(device)
     predicted_next_layer_keys = predictor(keys[valid_ids])
     
-    reference_attention_score = compute_attention_score(model, layer, reference_next_layers_keys[valid_ids], next_layer_queries[valid_ids], device)
-    predicted_attention_score = compute_attention_score(model, layer, predicted_next_layer_keys, next_layer_queries[valid_ids], device)
-    # print("attention score shapes", reference_attention_score.shape, predicted_attention_score.shape)
+    reference_attention_score = compute_attention_score(model, reference_next_layers_keys[valid_ids], next_layer_queries[valid_ids], device, layer_params, layer)
+    predicted_attention_score = compute_attention_score(model, predicted_next_layer_keys, next_layer_queries[valid_ids], device, layer_params, layer)
+    print("attention score shapes", reference_attention_score.shape, predicted_attention_score.shape)
 
-    value_states = value_states[valid_ids].view(args.valid_nsamples, next_layer_queries.shape[1], layer.self_attn.num_key_value_heads, layer.self_attn.head_dim).transpose(1, 2)
+    value_states = value_states[valid_ids].view(args.valid_nsamples, next_layer_queries.shape[1], layer_params["num_key_value_heads"], layer.self_attn.head_dim).transpose(1, 2)
     value_states = repeat_kv(value_states, layer.self_attn.num_key_value_groups)
     attn_output = torch.matmul(reference_attention_score.to(device=value_states.device), value_states)
     attn_output = attn_output.transpose(1, 2).contiguous()
@@ -98,7 +110,7 @@ def attention_weights_error(keys, reference_next_layers_keys, next_layer_queries
     valid_ids = valid_ids.cpu()
     reference_attention_output = reference_attention_output[valid_ids].to(device=attention_output.device)
     abs_error = torch.abs(attention_output - reference_attention_output)
-    relative_error = abs_error / (reference_attention_output + 1e-8)
+    relative_error = abs_error / (torch.abs(reference_attention_output) + 1e-8)
     print("Attention recreation error: mean abs error ", abs_error.mean().item(), "mean relative error ", relative_error.mean().item())
 
     # [16, 24, 1024, 1024]
@@ -117,32 +129,40 @@ def attention_weights_error(keys, reference_next_layers_keys, next_layer_queries
             rmse_heads[j].append(rmse_head)
     
     rmse_heads = [torch.stack(h) for h in rmse_heads]
-    rmse_heads = torch.stack(rmse_heads) # [valid_nsamples, n_heads]
-    rmse_heads = rmse_heads.mean(dim=0)
+    rmse_heads = torch.stack(rmse_heads) # [n_heads, valid_nsamples]
+    # print("stacked tensor", rmse_heads.shape)
+    rmse_heads = rmse_heads.mean(dim=1)
 
     stds = [torch.stack(h) for h in stds]
     stds = torch.stack(stds)
-    std = stds.mean(dim=0)
-    print(f"RMSE = {rmse_heads}, STD = {std}")
+    std = stds.mean(dim=1)
+    # print(rmse_heads.shape, std.shape)
+    # print(f"RMSE = {rmse_heads}, STD = {std}")
+    torch.save(rmse_heads, f"/mnt/data/kv_cahce_exps/heads_project/aquakv_results/qwen3-14B/rmse_layer_{layer_number}.pt")
+    torch.save(std, f"/mnt/data/kv_cahce_exps/heads_project/aquakv_results/qwen3-14B/std_layer_{layer_number}.pt")
 
 
 @torch.no_grad()
-def compute_attention_score(model, layer, keys, queries, device):
+def compute_attention_score(model, keys, queries, device, layer_params: dict, layer):
     bsz, q_len = queries.shape[0], queries.shape[1]
     position_ids = torch.arange(q_len).unsqueeze(dim=0)
-    position_embeddings = model.model.rotary_emb(keys, position_ids)
+    position_embeddings = model.model.rotary_emb(keys, position_ids.to(device=keys.device))
     cos, sin = position_embeddings
     sin = sin.to(device=device)
     cos = cos.to(device=device)
-    query_states = queries.view(bsz, q_len, layer.self_attn.num_heads, layer.self_attn.head_dim).transpose(1, 2)
-    key_states = keys.view(bsz, q_len, layer.self_attn.num_key_value_heads, layer.self_attn.head_dim).transpose(1, 2)
-
+    query_states = queries.view(bsz, q_len, layer_params["num_heads"], layer_params["head_dim"])
+    key_states = keys.view(bsz, q_len, layer_params["num_key_value_heads"], layer_params["head_dim"])
+    if hasattr(layer.self_attn, "q_norm"):
+        query_states = layer.self_attn.q_norm(query_states)
+        key_states = layer.self_attn.k_norm(key_states)
+    query_states = query_states.transpose(1, 2)
+    key_states = key_states.transpose(1, 2)
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-    key_states = repeat_kv(key_states, layer.self_attn.num_key_value_groups)
+    key_states = repeat_kv(key_states, layer_params["num_key_value_groups"])
     attn_weights = []
     causal_mask = compute_causal_mask(q_len, q_len, device=key_states.device)
     for i in tqdm(range(bsz), desc="computing attention scores"):
-        attn_weight = torch.matmul(query_states[i: i + 1], key_states[i: i + 1].transpose(2, 3)) / math.sqrt(layer.self_attn.head_dim) # [b, n_heads, q_len, k_len]
+        attn_weight = torch.matmul(query_states[i: i + 1], key_states[i: i + 1].transpose(2, 3)) / math.sqrt(layer_params["head_dim"]) # [b, n_heads, q_len, k_len]
         attn_weight += causal_mask
         attn_weight = nn.functional.softmax(attn_weight, dim=-1, dtype=torch.float32).to(query_states.dtype)
         attn_weight = attn_weight.squeeze(dim=0).cpu()
@@ -428,13 +448,32 @@ def main():
             key_predictor, mse_train_keys, mse_valid_keys = get_predictor(args, key_predictor_inputs, attn_keys)
 
             prev_layer_keys = torch.stack(key_predictor_inputs).to(device=args.devices[0])
-            attention_weights_error(prev_layer_keys, key_states, query_states, model, layer, key_predictor, args, reference_attention_output, value_states)
+            layer_params = {
+                "num_heads": model.config.num_attention_heads,
+                "num_key_value_heads": model.config.num_key_value_heads,
+                "head_dim": layer.self_attn.head_dim, 
+                "num_key_value_groups": layer.self_attn.num_key_value_groups,
+            }
+            attention_weights_error(
+                prev_layer_keys, 
+                key_states, 
+                query_states, 
+                model, 
+                layer, 
+                key_predictor, 
+                args, 
+                reference_attention_output, 
+                value_states, 
+                layer_params,
+                layer_index
+            )
 
             layers[layer_index] = layer.to(device=layer_device_original, dtype=layer_dtype_original)
             del layer
             torch.cuda.empty_cache()
 
-        # attn_keys = get_dequant_values(args, quantizer if layer_index != 0 else first_layer_quantizer, key_predictor, key_predictor_inputs, attn_keys)
+        """
+        attn_keys = get_dequant_values(args, quantizer if layer_index != 0 else first_layer_quantizer, key_predictor, key_predictor_inputs, attn_keys)
         del key_predictor_inputs
         if layer_index != 0:
             key_predictors[layer_index] = key_predictor.cpu()
@@ -458,7 +497,7 @@ def main():
         print(
             f'{layer_index=}\tPREDICTOR_VALUES \t| relMSE train: {mse_train_values:.4f} valid: {mse_valid_values:.4f} '
             f'| equiv.bits train: {train_bits_values:.2f} valid: {valid_bits_values:.2f}')
-
+        """
         old_attn_keys, old_attn_values = attn_keys, attn_values
 
     torch.save(dict(key_predictors=key_predictors, value_predictors=value_predictors), args.predictors_output_path)

@@ -200,7 +200,7 @@ def _update_outs_parallel(
 
 
 def get_layers(model: transformers.PreTrainedModel) -> List[nn.Module]:
-    if model.config.model_type in (*LLAMA_LIKE, "phi3"):
+    if model.config.model_type in (*LLAMA_LIKE, "phi3", "qwen3"):
         return model.model.layers
     elif model.config.model_type.lower() in FALCON_TYPES:
         return model.transformer.h
