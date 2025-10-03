@@ -34,10 +34,12 @@ class OutputCatcherMultiInput(nn.Module):
         self.inner = inner
         self.offload_activations = offload_activations
         self.outputs = []
+        self.attention_score_outputs = []
 
     def forward(self, **kwargs):
         output = self.inner(**kwargs)
         self.outputs.append(output[0].to('cpu'))
+        self.attention_score_outputs.append(output[1].to('cpu'))
         return output
 
 
@@ -74,53 +76,14 @@ def compute_causal_mask(q_len, k_len, device):
     return mask
 
 
-@torch.no_grad()
-def attention_weights_error(
-    keys, 
-    reference_next_layers_keys, 
-    next_layer_queries, 
-    model, 
-    layer, 
-    predictor, 
-    args, 
-    reference_attention_output, 
-    value_states,
-    layer_params: dict,
-    layer_number: int
-):
-    bsz = keys.shape[0]
-    device = args.devices[0]
-    _, valid_ids = torch.randperm(
-        bsz, generator=torch.Generator("cpu").manual_seed(args.seed), device="cpu"
-    ).split_with_sizes((args.total_nsamples - args.valid_nsamples, args.valid_nsamples))
-    valid_ids = valid_ids.to(device)
-    predicted_next_layer_keys = predictor(keys[valid_ids])
-    
-    reference_attention_score = compute_attention_score(model, reference_next_layers_keys[valid_ids], next_layer_queries[valid_ids], device, layer_params, layer)
-    predicted_attention_score = compute_attention_score(model, predicted_next_layer_keys, next_layer_queries[valid_ids], device, layer_params, layer)
-    print("attention score shapes", reference_attention_score.shape, predicted_attention_score.shape)
-
-    value_states = value_states[valid_ids].view(args.valid_nsamples, next_layer_queries.shape[1], layer_params["num_key_value_heads"], layer.self_attn.head_dim).transpose(1, 2)
-    value_states = repeat_kv(value_states, layer.self_attn.num_key_value_groups)
-    attn_output = torch.matmul(reference_attention_score.to(device=value_states.device), value_states)
-    attn_output = attn_output.transpose(1, 2).contiguous()
-    attn_output = attn_output.reshape(args.valid_nsamples, next_layer_queries.shape[1], -1)
-
-    attention_output = layer.self_attn.o_proj(attn_output)
-    valid_ids = valid_ids.cpu()
-    reference_attention_output = reference_attention_output[valid_ids].to(device=attention_output.device)
-    abs_error = torch.abs(attention_output - reference_attention_output)
-    relative_error = abs_error / (torch.abs(reference_attention_output) + 1e-8)
-    print("Attention recreation error: mean abs error ", abs_error.mean().item(), "mean relative error ", relative_error.mean().item())
-
-    # [16, 24, 1024, 1024]
+def compute_rmse_and_std(reference_attention_score, predicted_attention_score, valid_nsamples, device):
     n_heads = predicted_attention_score.shape[1]
     rmse_heads = [[] for _ in range(n_heads)]
     stds = [[] for _ in range(n_heads)]
 
     mask = torch.tril(torch.ones((reference_attention_score.shape[2], reference_attention_score.shape[3]), dtype=torch.int))
     non_zero_elems = mask.sum()
-    for i in tqdm(range(args.valid_nsamples), desc="computing rmse and std"):
+    for i in tqdm(range(valid_nsamples), desc="computing rmse and std"):
         for j in range(n_heads):
             xb, yb = [tensor[i, j].to(device=device, non_blocking=True) for tensor in (predicted_attention_score, reference_attention_score)]
             rmse_head = torch.square(xb - yb)[mask.bool()].sum() / non_zero_elems # [b, 1, q_len, q_len] = [32, 1, 1k, 1k]
@@ -136,10 +99,86 @@ def attention_weights_error(
     stds = [torch.stack(h) for h in stds]
     stds = torch.stack(stds)
     std = stds.mean(dim=1)
-    # print(rmse_heads.shape, std.shape)
-    # print(f"RMSE = {rmse_heads}, STD = {std}")
-    torch.save(rmse_heads, f"/mnt/data/kv_cahce_exps/heads_project/aquakv_results/qwen3-14B/rmse_layer_{layer_number}.pt")
-    torch.save(std, f"/mnt/data/kv_cahce_exps/heads_project/aquakv_results/qwen3-14B/std_layer_{layer_number}.pt")
+    return rmse_heads, std
+
+@torch.no_grad()
+def attention_weights_error(
+    keys, 
+    reference_next_layers_keys, 
+    next_layer_queries, 
+    model, 
+    layer, 
+    predictor, 
+    args, 
+    reference_attention_output, 
+    reference_attention_score,
+    value_states,
+    layer_params: dict,
+    layer_number: int
+):
+    bsz = keys.shape[0]
+    device = args.devices[0]
+    _, valid_ids = torch.randperm(
+        bsz, generator=torch.Generator("cpu").manual_seed(args.seed), device="cpu"
+    ).split_with_sizes((args.total_nsamples - args.valid_nsamples, args.valid_nsamples))
+    valid_ids = valid_ids.to(device)
+    predicted_next_layer_keys = predictor(keys[valid_ids])
+
+    reference_attention_score_recomputed = compute_attention_score(model, reference_next_layers_keys[valid_ids], next_layer_queries[valid_ids], device, layer_params, layer)
+    predicted_attention_score = compute_attention_score(model, predicted_next_layer_keys, next_layer_queries[valid_ids], device, layer_params, layer)
+    attention_score_from_prev_keys =  compute_attention_score(model, keys[valid_ids], next_layer_queries[valid_ids], device, layer_params, layer)
+    print("attention score shapes", reference_attention_score_recomputed.shape, reference_attention_score.shape, predicted_attention_score.shape, attention_score_from_prev_keys.shape)
+
+    # NOTE: эта часть кода только для провекри корректности с attn_implementation="spda". 
+    # Тогда не материализуются аттеншен веса и я считаю attention_output чтобы сравнить его с тем что даёт мне слой из LLaMA/Qwen
+    # так относительная ошибка получается ~0.1 и не понятно баг у меня или неточность в вычислениях
+    # так как сейчас код работает с attn_implementation="eager", то у нас есть настоящие аттеншен веса - reference_attention_score
+    # и корректность можно проверять по ним - считать ошибку между reference_attention_score и reference_attention_score_recomputed, не считая attention_output вообще
+    # так что не стесняйтесь закоментировать 3 следующих абзаца кода чтобы считалось быстрее
+    value_states = value_states[valid_ids].view(args.valid_nsamples, next_layer_queries.shape[1], layer_params["num_key_value_heads"], layer.self_attn.head_dim).transpose(1, 2)
+    value_states = repeat_kv(value_states, layer.self_attn.num_key_value_groups)
+    attn_output = torch.matmul(reference_attention_score_recomputed.to(device=value_states.device), value_states)
+    attn_output = attn_output.transpose(1, 2).contiguous()
+    attn_output = attn_output.reshape(args.valid_nsamples, next_layer_queries.shape[1], -1)
+
+    attention_output = layer.self_attn.o_proj(attn_output)
+    valid_ids = valid_ids.cpu()
+    reference_attention_output = reference_attention_output[valid_ids].to(device=attention_output.device)
+    abs_error = torch.abs(attention_output - reference_attention_output)
+    relative_error = abs_error / (torch.abs(reference_attention_output) + 1e-8)
+    print("Attention output error: mean abs error ", abs_error.mean().item(), "mean relative error ", relative_error.mean().item())
+    del relative_error, abs_error, reference_attention_output, attention_output
+
+    reference_attention_score = reference_attention_score[valid_ids].to(device=reference_attention_score_recomputed.device)
+    abs_error = torch.abs(reference_attention_score_recomputed - reference_attention_score)
+    relative_error = abs_error / (torch.abs(reference_attention_score) + 1e-8)
+    print("Attention weights error: mean abs error ", abs_error.mean().item(), "mean relative error ", relative_error.mean().item())
+    # del relative_error, abs_error, reference_attention_score, reference_attention_score_recomputed
+
+    # NOTE: это ещё одна проверка корректности - только по ненулевым значениям аттеншен весов и отдельно для каждой головы
+    # Но это тоже можно закоментировать для ускорения
+    rmse_heads_check, std_check = compute_rmse_and_std(reference_attention_score, reference_attention_score_recomputed, args.valid_nsamples, device)
+    print("check")
+    print(f"RMSE = {rmse_heads_check}, STD = {std_check}")
+
+    rmse_heads_prev_layer, std_prev_layer = compute_rmse_and_std(reference_attention_score, attention_score_from_prev_keys, args.valid_nsamples, device)
+    rmse_heads, std = compute_rmse_and_std(reference_attention_score, predicted_attention_score, args.valid_nsamples, device)
+
+    print("prev layer")
+    print(rmse_heads_prev_layer.shape, std_prev_layer.shape)
+    print(f"RMSE = {rmse_heads_prev_layer}, STD = {std_prev_layer}")
+    
+    print('aquakv predictions')
+    print(rmse_heads.shape, std.shape)
+    print(f"RMSE = {rmse_heads}, STD = {std}")
+    print("---------------")
+    model_name = "qwen3-14B" # "llama-3.2-3B"
+
+    torch.save(rmse_heads_prev_layer, f"/mnt/data/kv_cahce_exps/heads_project/keys_from_prev_layer/{model_name}/rmse_layer_{layer_number}.pt")
+    torch.save(std_prev_layer, f"/mnt/data/kv_cahce_exps/heads_project/keys_from_prev_layer/{model_name}/rmse_layer_{layer_number}.pt")
+    
+    # torch.save(rmse_heads, f"/mnt/data/kv_cahce_exps/heads_project/aquakv_results/{model_name}/rmse_layer_{layer_number}.pt")
+    # torch.save(std, f"/mnt/data/kv_cahce_exps/heads_project/aquakv_results/{model_name}/std_layer_{layer_number}.pt")
 
 
 @torch.no_grad()
@@ -341,7 +380,8 @@ def main():
     # load model and data
     model = transformers.AutoModelForCausalLM.from_pretrained(
         args.model_name, torch_dtype=args.torch_dtype, low_cpu_mem_usage=True,
-        use_cache=False
+        use_cache=False,
+        attn_implementation="eager"
     )
     config = transformers.AutoConfig.from_pretrained(args.model_name)
     print(model.config._attn_implementation)
@@ -411,6 +451,7 @@ def main():
         modelutils.update_outs_inplace_(args.devices, layer, inps, outs, **forward_args, compute_mse=False)
 
         reference_attention_output = torch.stack(layer.self_attn.outputs).squeeze(dim=1)
+        reference_attention_weights = torch.stack(layer.self_attn.attention_score_outputs).squeeze(dim=1)
         layer.self_attn = layer.self_attn.inner
 
         attn_keys = layer.self_attn.k_proj.outputs
@@ -463,6 +504,7 @@ def main():
                 key_predictor, 
                 args, 
                 reference_attention_output, 
+                reference_attention_weights,
                 value_states, 
                 layer_params,
                 layer_index
