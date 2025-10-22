@@ -1,11 +1,15 @@
 import math
 from argparse import Namespace
 from typing import Sequence, Optional, List, Tuple
+import time
 
+from pathlib import Path
 import torch
 import torch.nn as nn
 import transformers
 from tqdm import tqdm, trange
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 
 from aquakv import datautils, modelutils
 from aquakv.quantizers import QuantizerBase, HiggsQuantizer
@@ -86,8 +90,10 @@ def compute_rmse_and_std(reference_attention_score, predicted_attention_score, v
     for i in tqdm(range(valid_nsamples), desc="computing rmse and std"):
         for j in range(n_heads):
             xb, yb = [tensor[i, j].to(device=device, non_blocking=True) for tensor in (predicted_attention_score, reference_attention_score)]
-            rmse_head = torch.square(xb - yb)[mask.bool()].sum() / non_zero_elems # [b, 1, q_len, q_len] = [32, 1, 1k, 1k]
-            std = rmse_head / yb[mask.bool()].std()
+            rmse_head = torch.sqrt(
+                torch.square(xb - yb)[mask.bool()].sum() / non_zero_elems # [q_len, q_len] = [1k, 1k]
+            )
+            std = yb[mask.bool()].std()
             stds[j].append(std)
             rmse_heads[j].append(rmse_head)
     
@@ -114,7 +120,8 @@ def attention_weights_error(
     reference_attention_score,
     value_states,
     layer_params: dict,
-    layer_number: int
+    layer_number: int,
+    model_name: str
 ):
     bsz = keys.shape[0]
     device = args.devices[0]
@@ -126,28 +133,7 @@ def attention_weights_error(
 
     reference_attention_score_recomputed = compute_attention_score(model, reference_next_layers_keys[valid_ids], next_layer_queries[valid_ids], device, layer_params, layer)
     predicted_attention_score = compute_attention_score(model, predicted_next_layer_keys, next_layer_queries[valid_ids], device, layer_params, layer)
-    attention_score_from_prev_keys =  compute_attention_score(model, keys[valid_ids], next_layer_queries[valid_ids], device, layer_params, layer)
-    print("attention score shapes", reference_attention_score_recomputed.shape, reference_attention_score.shape, predicted_attention_score.shape, attention_score_from_prev_keys.shape)
-
-    # NOTE: эта часть кода только для провекри корректности с attn_implementation="spda". 
-    # Тогда не материализуются аттеншен веса и я считаю attention_output чтобы сравнить его с тем что даёт мне слой из LLaMA/Qwen
-    # так относительная ошибка получается ~0.1 и не понятно баг у меня или неточность в вычислениях
-    # так как сейчас код работает с attn_implementation="eager", то у нас есть настоящие аттеншен веса - reference_attention_score
-    # и корректность можно проверять по ним - считать ошибку между reference_attention_score и reference_attention_score_recomputed, не считая attention_output вообще
-    # так что не стесняйтесь закоментировать 3 следующих абзаца кода чтобы считалось быстрее
-    value_states = value_states[valid_ids].view(args.valid_nsamples, next_layer_queries.shape[1], layer_params["num_key_value_heads"], layer.self_attn.head_dim).transpose(1, 2)
-    value_states = repeat_kv(value_states, layer.self_attn.num_key_value_groups)
-    attn_output = torch.matmul(reference_attention_score_recomputed.to(device=value_states.device), value_states)
-    attn_output = attn_output.transpose(1, 2).contiguous()
-    attn_output = attn_output.reshape(args.valid_nsamples, next_layer_queries.shape[1], -1)
-
-    attention_output = layer.self_attn.o_proj(attn_output)
-    valid_ids = valid_ids.cpu()
-    reference_attention_output = reference_attention_output[valid_ids].to(device=attention_output.device)
-    abs_error = torch.abs(attention_output - reference_attention_output)
-    relative_error = abs_error / (torch.abs(reference_attention_output) + 1e-8)
-    print("Attention output error: mean abs error ", abs_error.mean().item(), "mean relative error ", relative_error.mean().item())
-    del relative_error, abs_error, reference_attention_output, attention_output
+    # print("attention score shapes", reference_attention_score_recomputed.shape, reference_attention_score.shape, predicted_attention_score.shape, attention_score_from_prev_keys.shape)
 
     reference_attention_score = reference_attention_score[valid_ids].to(device=reference_attention_score_recomputed.device)
     abs_error = torch.abs(reference_attention_score_recomputed - reference_attention_score)
@@ -155,30 +141,14 @@ def attention_weights_error(
     print("Attention weights error: mean abs error ", abs_error.mean().item(), "mean relative error ", relative_error.mean().item())
     # del relative_error, abs_error, reference_attention_score, reference_attention_score_recomputed
 
-    # NOTE: это ещё одна проверка корректности - только по ненулевым значениям аттеншен весов и отдельно для каждой головы
-    # Но это тоже можно закоментировать для ускорения
-    rmse_heads_check, std_check = compute_rmse_and_std(reference_attention_score, reference_attention_score_recomputed, args.valid_nsamples, device)
-    print("check")
-    print(f"RMSE = {rmse_heads_check}, STD = {std_check}")
-
-    rmse_heads_prev_layer, std_prev_layer = compute_rmse_and_std(reference_attention_score, attention_score_from_prev_keys, args.valid_nsamples, device)
     rmse_heads, std = compute_rmse_and_std(reference_attention_score, predicted_attention_score, args.valid_nsamples, device)
-
-    print("prev layer")
-    print(rmse_heads_prev_layer.shape, std_prev_layer.shape)
-    print(f"RMSE = {rmse_heads_prev_layer}, STD = {std_prev_layer}")
-    
     print('aquakv predictions')
     print(rmse_heads.shape, std.shape)
     print(f"RMSE = {rmse_heads}, STD = {std}")
     print("---------------")
-    model_name = "qwen3-14B" # "llama-3.2-3B"
-
-    torch.save(rmse_heads_prev_layer, f"/mnt/data/kv_cahce_exps/heads_project/keys_from_prev_layer/{model_name}/rmse_layer_{layer_number}.pt")
-    torch.save(std_prev_layer, f"/mnt/data/kv_cahce_exps/heads_project/keys_from_prev_layer/{model_name}/rmse_layer_{layer_number}.pt")
     
-    # torch.save(rmse_heads, f"/mnt/data/kv_cahce_exps/heads_project/aquakv_results/{model_name}/rmse_layer_{layer_number}.pt")
-    # torch.save(std, f"/mnt/data/kv_cahce_exps/heads_project/aquakv_results/{model_name}/std_layer_{layer_number}.pt")
+    torch.save(rmse_heads, f"/mnt/data/kv_cahce_exps/heads_project/aquakv_results/{model_name}/rmse_layer_{layer_number}.pt")
+    torch.save(std, f"/mnt/data/kv_cahce_exps/heads_project/aquakv_results/{model_name}/std_layer_{layer_number}.pt")
 
 
 @torch.no_grad()
@@ -208,6 +178,69 @@ def compute_attention_score(model, keys, queries, device, layer_params: dict, la
         attn_weights.append(attn_weight)
     attn_weights = torch.stack(attn_weights)
     return attn_weights
+
+@torch.no_grad()
+def compute_sparcity(
+    predicted_attention_score,
+    reference_attention_score,
+    p
+):    
+    batch_size, num_heads, num_inputs, num_past_kv = reference_attention_score.shape # 1, 24, 1, 512
+
+    sorted_idx_predicted = predicted_attention_score.argsort(dim=-1, descending=True)
+    sorted_idx_reference = reference_attention_score.argsort(dim=-1, descending=True)
+    probs_sorted_predicted = reference_attention_score.gather(dim=-1, index=sorted_idx_predicted)
+    probs_sorted_reference = reference_attention_score.gather(dim=-1, index=sorted_idx_reference)
+    
+    top_p_num_tokens_predicted = ((probs_sorted_predicted.cumsum(dim=-1) < p).sum(dim=-1) + 1).clamp_max(num_past_kv)
+    predicted_sparsity = 1 - top_p_num_tokens_predicted / num_past_kv
+    mean_predicted_sparsity = predicted_sparsity.mean(dim=(0, 2)) # [batch, n_heads, q_len] => [n_heads]
+
+    top_p_num_tokens_reference = ((probs_sorted_reference.cumsum(dim=-1) < p).sum(dim=-1) + 1).clamp_max(num_past_kv)
+    # ^-- [batch_size, num_heads, num_inputs]  - you want to compute histogram/mean of this over tokens for each head
+    reference_sparsity = 1 - top_p_num_tokens_reference / num_past_kv
+    mean_reference_sparsity = reference_sparsity.mean(dim=(0, 2))
+    # print("mean_reference_sparsity first layer", mean_reference_sparsity.cpu().tolist())
+    return mean_predicted_sparsity.cpu().tolist(), mean_reference_sparsity.cpu().tolist()
+
+
+def compute_metrics(
+    keys, 
+    reference_next_layers_keys, 
+    next_layer_queries, 
+    model, 
+    layer, 
+    predictor, 
+    args, 
+    reference_attention_score,
+    layer_params: dict,
+    sparsity_level: float 
+):
+    bsz = keys.shape[0]
+    device = args.devices[0]
+    _, valid_ids = torch.randperm(
+        bsz, generator=torch.Generator("cpu").manual_seed(args.seed), device="cpu"
+    ).split_with_sizes((args.total_nsamples - args.valid_nsamples, args.valid_nsamples))
+    valid_ids = valid_ids.to(device)
+    predicted_next_layer_keys = predictor(keys[valid_ids])
+
+    reference_attention_score_recomputed = compute_attention_score(model, reference_next_layers_keys[valid_ids], next_layer_queries[valid_ids], device, layer_params, layer)
+    predicted_attention_score = compute_attention_score(model, predicted_next_layer_keys, next_layer_queries[valid_ids], device, layer_params, layer)
+
+    reference_attention_score = reference_attention_score[valid_ids.cpu()].to(device=reference_attention_score_recomputed.device)
+    abs_error = torch.abs(reference_attention_score_recomputed - reference_attention_score)
+    relative_error = abs_error / (torch.abs(reference_attention_score) + 1e-8)
+    print("Attention weights error: mean abs error ", abs_error.mean().item(), "mean relative error ", relative_error.mean().item())
+
+    predicted_sparsity, reference_sparsity = compute_sparcity(
+        predicted_attention_score,
+        reference_attention_score,
+        sparsity_level
+    )
+
+    rmse_heads, std = compute_rmse_and_std(reference_attention_score, predicted_attention_score, args.valid_nsamples, device)
+
+    return predicted_sparsity, reference_sparsity, rmse_heads, std
 
 
 @torch.no_grad()
@@ -385,6 +418,12 @@ def main():
     )
     config = transformers.AutoConfig.from_pretrained(args.model_name)
     print(model.config._attn_implementation)
+    if args.model_name == "unsloth/Llama-3.2-3B":
+        save_model_name = "Llama-3.2-3B"
+    elif args.model_name == "Qwen/Qwen3-14B":
+        save_model_name = "Qwen3-14B"
+    else: 
+        raise ValueError()
 
     data = datautils.get_loaders(
         args.dataset,
@@ -436,9 +475,12 @@ def main():
 
     key_predictors = {}
     value_predictors = {}
-
+    new_layer_start = time.perf_counter()
+    reference_head_layers_sparsity, predicted_head_layers_sparsity = [], []
+    rmses, stds = [], []
     for layer_index in range(len(layers)):
-        print(f"\n---------------- Layer {layer_index} of {len(layers)} ----------------")
+        print(f"\n---------------- Layer {layer_index} of {len(layers)} ----------------, took {time.perf_counter() - new_layer_start}")
+        new_layer_start = time.perf_counter()
         layer_device_original = next(layers[layer_index].parameters()).device
         layer_dtype_original = next(layers[layer_index].parameters()).dtype
         layer = layers[layer_index].to(device=args.devices[0], dtype=args.compute_dtype or layer_dtype_original)
@@ -470,7 +512,6 @@ def main():
         layer.self_attn.v_proj = layer.self_attn.v_proj.inner
         layer.self_attn.q_proj = layer.self_attn.q_proj.inner
 
-        
         inps, outs = outs, inps
 
         if layer_index == 0:
@@ -495,7 +536,8 @@ def main():
                 "head_dim": layer.self_attn.head_dim, 
                 "num_key_value_groups": layer.self_attn.num_key_value_groups,
             }
-            attention_weights_error(
+
+            predicted_sparsity, reference_sparsity, rmse_heads, std = compute_metrics(
                 prev_layer_keys, 
                 key_states, 
                 query_states, 
@@ -503,12 +545,14 @@ def main():
                 layer, 
                 key_predictor, 
                 args, 
-                reference_attention_output, 
                 reference_attention_weights,
-                value_states, 
                 layer_params,
-                layer_index
+                0.9
             )
+            predicted_head_layers_sparsity.extend(predicted_sparsity)
+            reference_head_layers_sparsity.extend(reference_sparsity)
+            rmses.extend(rmse_heads)
+            stds.extend(std)
 
             layers[layer_index] = layer.to(device=layer_device_original, dtype=layer_dtype_original)
             del layer
@@ -542,8 +586,18 @@ def main():
         """
         old_attn_keys, old_attn_values = attn_keys, attn_values
 
-    torch.save(dict(key_predictors=key_predictors, value_predictors=value_predictors), args.predictors_output_path)
-    print("Saved predictors to", args.predictors_output_path)
+    # torch.save(dict(key_predictors=key_predictors, value_predictors=value_predictors), args.predictors_output_path)
+    # print("Saved predictors to", args.predictors_output_path)
+
+    print(len(predicted_head_layers_sparsity), len(reference_head_layers_sparsity), len(rmses), len(stds))
+    rmse_std_save_path = Path("/home/aabocharnikov/src/kvguarantees/heads_up_results_new_code/rmse_std/red_pajama")
+    sparsity_save_path = Path("/home/aabocharnikov/src/kvguarantees/heads_up_results_new_code/sparsity_0.9/red_pajama")
+
+    torch.save(torch.tensor(predicted_head_layers_sparsity), sparsity_save_path / save_model_name / "aquakv.pt")
+    torch.save(torch.tensor(reference_head_layers_sparsity), sparsity_save_path / save_model_name / "aquakv_reference.pt")
+
+    torch.save(torch.tensor(rmses), rmse_std_save_path / save_model_name / "rmse_aquakv.pt")
+    torch.save(torch.tensor(stds), rmse_std_save_path / save_model_name / "std_aquakv.pt")
 
 
 if __name__ == "__main__":

@@ -235,14 +235,25 @@ def get_loaders(
         if name.lower() == "wikitext2":
             data = get_wikitext2(nsamples, seqlen, tokenizer, eval_mode=eval_mode)
         elif name.lower() == "pajama":
-            data = get_red_pajama(nsamples, seqlen, tokenizer, eval_mode=eval_mode)
-            data_dump = torch.stack(data)
-            # _, valid_ids = torch.randperm(args.total_nsamples, generator=torch.Generator("cpu").manual_seed(args.seed), device="cpu"
-            # ).split_with_sizes((args.total_nsamples - args.valid_nsamples, args.valid_nsamples))
-            # print(data_dump[valid_ids].shape)
-            # print(valid_ids)
-            # print(data_dump[valid_ids])
+            # data = get_red_pajama(nsamples, seqlen, tokenizer, eval_mode=eval_mode)
+            # data_dump = torch.stack(data)
             # torch.save(data_dump[valid_ids].cpu(), "/mnt/data/kv_cahce_exps/heads_project/validation_inputs_dump.pt")
+            # torch.save(data_dump[train_ids].cpu(), "/mnt/data/kv_cahce_exps/heads_project/train_inputs_dump.pt")
+            
+            train_ids, valid_ids = torch.randperm(args.total_nsamples, generator=torch.Generator("cpu").manual_seed(args.seed), device="cpu"
+            ).split_with_sizes((args.total_nsamples - args.valid_nsamples, args.valid_nsamples))
+            train = torch.load("/mnt/data/kv_cahce_exps/heads_project/train_inputs_dump.pt")
+            validation = torch.load("/mnt/data/kv_cahce_exps/heads_project/validation_inputs_dump.pt")
+            data = torch.zeros((nsamples, 1, seqlen), dtype=torch.long)
+            data[valid_ids] = validation
+            data[train_ids] = train
+            data = [data[i] for i in range(nsamples)]
+            
+            # print(data_dump[valid_ids].shape)
+            # print(data_dump[valid_ids])
+            # check = torch.load("/mnt/data/kv_cahce_exps/heads_project/validation_inputs_dump.pt")
+            # print("IS IT THE SAME", torch.all(data_dump[valid_ids] == check))
+
         elif name.lower() == "ptb":
             data = get_ptb(nsamples, seqlen, tokenizer, eval_mode=eval_mode)
         elif name.lower() == "ptb_new":
