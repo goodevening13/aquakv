@@ -590,8 +590,9 @@ def main():
     # print("Saved predictors to", args.predictors_output_path)
 
     print(len(predicted_head_layers_sparsity), len(reference_head_layers_sparsity), len(rmses), len(stds))
-    rmse_std_save_path = Path("/home/aabocharnikov/src/kvguarantees/heads_up_results_new_code/rmse_std/red_pajama")
-    sparsity_save_path = Path("/home/aabocharnikov/src/kvguarantees/heads_up_results_new_code/sparsity_0.9/red_pajama")
+    # heads_up_results_new_code
+    rmse_std_save_path = Path("/home/aabocharnikov/src/kvguarantees/aquakv_new_code_debug_recompute/rmse_std/red_pajama")
+    sparsity_save_path = Path("/home/aabocharnikov/src/kvguarantees/aquakv_new_code_debug_recompute/sparsity_0.9/red_pajama")
 
     torch.save(torch.tensor(predicted_head_layers_sparsity), sparsity_save_path / save_model_name / "aquakv.pt")
     torch.save(torch.tensor(reference_head_layers_sparsity), sparsity_save_path / save_model_name / "aquakv_reference.pt")
