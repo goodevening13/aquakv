@@ -1,3 +1,4 @@
+from collections import defaultdict
 import math
 from argparse import Namespace
 from typing import Sequence, Optional, List, Tuple
@@ -82,30 +83,29 @@ def compute_causal_mask(q_len, k_len, device):
 
 def compute_rmse_and_std(reference_attention_score, predicted_attention_score, valid_nsamples, device):
     n_heads = predicted_attention_score.shape[1]
-    rmse_heads = [[] for _ in range(n_heads)]
-    stds = [[] for _ in range(n_heads)]
+    total_squared_error = defaultdict(int)
+    total_samples = defaultdict(int)
+    total_Y = defaultdict(int)
+    total_Y_sq = defaultdict(int)
 
     mask = torch.tril(torch.ones((reference_attention_score.shape[2], reference_attention_score.shape[3]), dtype=torch.int))
     non_zero_elems = mask.sum()
+    mask = mask.bool()
     for i in tqdm(range(valid_nsamples), desc="computing rmse and std"):
         for j in range(n_heads):
             xb, yb = [tensor[i, j].to(device=device, non_blocking=True) for tensor in (predicted_attention_score, reference_attention_score)]
-            rmse_head = torch.sqrt(
-                torch.square(xb - yb)[mask.bool()].sum() / non_zero_elems # [q_len, q_len] = [1k, 1k]
-            )
-            std = yb[mask.bool()].std()
-            stds[j].append(std)
-            rmse_heads[j].append(rmse_head)
-    
-    rmse_heads = [torch.stack(h) for h in rmse_heads]
-    rmse_heads = torch.stack(rmse_heads) # [n_heads, valid_nsamples]
-    # print("stacked tensor", rmse_heads.shape)
-    rmse_heads = rmse_heads.mean(dim=1)
+            total_squared_error[j] += ((xb - yb)[mask] ** 2).sum().item()
+            total_samples[j] += non_zero_elems
+            total_Y[j] += yb[mask].sum().item()
+            total_Y_sq[j] += (yb[mask] ** 2).sum().item()
 
-    stds = [torch.stack(h) for h in stds]
-    stds = torch.stack(stds)
-    std = stds.mean(dim=1)
+    rmse_heads, std = [], []
+    for j in range(n_heads):
+        rmse_heads.append(torch.sqrt(total_squared_error[j] / total_samples[j]))
+        std.append(torch.sqrt(total_Y_sq[j] / total_samples[j] - (total_Y[j] / total_samples[j]) ** 2))
+
     return rmse_heads, std
+
 
 @torch.no_grad()
 def attention_weights_error(
@@ -146,7 +146,7 @@ def attention_weights_error(
     print(rmse_heads.shape, std.shape)
     print(f"RMSE = {rmse_heads}, STD = {std}")
     print("---------------")
-    
+
     torch.save(rmse_heads, f"/mnt/data/kv_cahce_exps/heads_project/aquakv_results/{model_name}/rmse_layer_{layer_number}.pt")
     torch.save(std, f"/mnt/data/kv_cahce_exps/heads_project/aquakv_results/{model_name}/std_layer_{layer_number}.pt")
 
