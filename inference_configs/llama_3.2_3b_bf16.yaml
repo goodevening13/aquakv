@@ -1,0 +1,13 @@
+model_name: unsloth/Llama-3.2-3B
+
+batch_size: 4
+generation_length: null
+prefill_size: 4
+
+cache:
+ _target_: aquakv.cache_utils.EfficientStaticCache # transformers.cache_utils.StaticCache
+ batch_size: ${batch_size}
+ max_cache_len: ${generation_length}
+ config: ???
+ device: ???
+ dtype: ???
