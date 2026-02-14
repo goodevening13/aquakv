@@ -238,7 +238,7 @@ def main():
 
     common_quantizer_kwargs = dict(
         hadamard_groupsize = args.hadamard_groupsize, 
-        channel_size=config.head_dim * config.num_key_value_heads
+        channel_size=args.hadamard_groupsize
     )
 
     quantizer = HiggsQuantizer(
